@@ -23,16 +23,20 @@ if (FALSE) {
 APP_VERSION <- "2.0"
 V1_URL      <- "https://zenodo.org/records/4647766"   # MagnaGenes v1.0
 TSL_URL     <- "https://www.tsl.ac.uk/"
+OPENRICEBLAST_URL  <- "http://openriceblast.org"
+OPENWHEATBLAST_URL <- "http://openwheatblast.net/"
+CONTACT_EMAIL      <- "neha.sahu.tsl@gmail.com"
 
 # Version history shown on the About page. Add new releases at the top.
 VERSION_HISTORY <- list(
   list(version = "2.0", date = "November 2026", current = TRUE,
        notes = c("Redesigned interface with one search box for MGG IDs, gene names and keywords, a light/dark theme and a Reset button.",
                  "Gene profiles with UniProt, AlphaFold DB, Ensembl Fungi, InterPro, Pfam and PubMed links, a per-experiment expression heatmap, a labelled protein architecture diagram and protein/CDS FASTA export.",
-                 "Transcriptomics: one framed plot per experiment with links to the source papers, red-white-blue heatmaps on each experiment's own scale, and gene-gene correlation.",
-                 "Phosphoproteomics: replicate bar charts and heatmaps for Guy11 and \u0394pmk1, fold-change statistics and protein site maps.",
-                 "Phylogenomics: ortholog counts on the species tree, shaded by lifestyle, with appressorium annotation.",
+                 "Transcriptomics: TPM line plots sized to each experiment, with replicate error bars where available and an optional box plot; row z-score heatmaps with optional TPM labels; gene-gene correlation on a colour range fitted to the selected genes.",
+                 "Phosphoproteomics: one replicate bar chart per phosphopeptide (Guy11 above \u0394pmk1), heatmaps, fold-change statistics and protein site maps with labelled sites and Pfam domains.",
+                 "Phylogenomics: ortholog counts on the species tree, in deeper shades of each lifestyle colour with more copies, with appressorium annotation.",
                  "GO enrichment (Fisher's exact test) with dot/lollipop plots, bar charts, treemaps, significance-vs-enrichment plots and gene-term matrices, in a colour of your choice.",
+                 "Video tutorial with chapters, opened from the Tutorial button.",
                  "Runs fully in the browser with Shinylive; the AI chat module was removed.")),
   list(version = "1.0", date = "March 2021", current = FALSE, url = V1_URL,
        notes = c("First release of MagnaGenes by Andrew J. Foster and colleagues: an open science database of gene function studies in the blast fungus Magnaporthe oryzae."))
@@ -135,15 +139,13 @@ EXP_INFO  <- expr$experiments
 EXP_SHORT <- setNames(EXP_INFO$label, EXP_INFO$experiment)
 expr$conditions$short <- unname(EXP_SHORT[expr$conditions$experiment])
 
-transform_expr <- function(m, scale) {
-  if (scale == "tpm") return(m)
-  l <- log2(m + 1)
-  if (scale == "log") return(l)
-  z <- t(scale(t(l)))
+# Row z-score of log2(TPM + 1): each gene centred and scaled across the given columns
+row_z <- function(m) {
+  z <- t(scale(t(log2(m + 1))))
   z[!is.finite(z)] <- NA
+  dimnames(z) <- dimnames(m)
   z
 }
-scale_label <- c(log = "log₂(TPM + 1)", tpm = "TPM", z = "Row z-score")
 
 cluster_order <- function(m) {
   if (nrow(m) < 3) return(seq_len(nrow(m)))
@@ -342,16 +344,23 @@ RAMP_SAMPLE <- list("Guy11" = c("#f1f9f3", "#c7e9cf", "#8fd0a1", "#4fae6c", "#1f
                     "Δpmk1" = c("#f6f6f6", "#d9d9d9", "#b0b0b0", "#7f7f7f", "#4f4f4f", "#222222"))
 
 # Phylogenomics: lifestyle colours from MagnaGenes v1.0 (ColorBrewer Pastel2,
-# alphabetical); cells are shaded from the pastel (1 copy) to a dark tone.
+# alphabetical); cells are shaded from the pastel (1 copy) to deeper shades of
+# the same hue (more copies).
 LIFESTYLES <- c("Biotroph", "Commensal", "Endophyte", "Hemibiotroph", "Necrotroph", "Saprophyte", "Symbiont")
 COL_LIFESTYLE <- setNames(c("#B3E2CD", "#FDCDAC", "#CBD5E8", "#F4CAE4", "#E6F5C9", "#FFF2AE", "#F1E2CC"),
                           LIFESTYLES)
-lifestyle_ramp <- function(col) {
-  dark <- grDevices::rgb(t(grDevices::col2rgb(col) * 0.42), maxColorValue = 255)
-  grDevices::colorRampPalette(c(col, dark))(6)
+# Same hue, rising chroma and falling lightness (HCL), so every shade reads as
+# the lifestyle colour rather than drifting towards brown or grey
+lifestyle_ramp <- function(col, n = 6) {
+  luv <- grDevices::convertColor(t(grDevices::col2rgb(col) / 255), from = "sRGB", to = "Luv")
+  h <- atan2(luv[3], luv[2]) * 180 / pi
+  c0 <- sqrt(luv[2]^2 + luv[3]^2)
+  grDevices::hcl(h, c = seq(c0, max(c0 + 45, 75), length.out = n), l = seq(luv[1], 50, length.out = n),
+                 fixup = TRUE)
 }
-# Appressorium type (not coloured in v1.0): melanin-inspired tones
-COL_APPRESS <- c(None = "#f1ede6", Hyaline = "#d8c8b0", Compound = "#9a7752", Melanized = "#4a3424")
+# Appressorium type (not coloured in v1.0): melanin-inspired tones. Species
+# without an appressorium are left blank.
+COL_APPRESS <- c(Hyaline = "#d8c8b0", Compound = "#9a7752", Melanized = "#4a3424")
 
 colorscale <- function(cols) {
   n <- length(cols)
@@ -370,7 +379,11 @@ ax <- function(title = NULL, ...) {
   ), list(...))
 }
 
+# legend: TRUE/FALSE to show or hide it, or a list of legend settings
 finish_plot <- function(p, file = "magnagenes_plot", legend = TRUE, ...) {
+  leg <- list(orientation = "h", x = 0, y = 1.02, yanchor = "bottom",
+              font = list(size = fsz(-1), color = INK2))
+  if (is.list(legend)) { leg <- modifyList(leg, legend); legend <- TRUE }
   p |>
     layout(
       font = list(family = FONT, size = fsz(0), color = INK),
@@ -378,8 +391,7 @@ finish_plot <- function(p, file = "magnagenes_plot", legend = TRUE, ...) {
       hoverlabel = list(bgcolor = SURFACE, bordercolor = AXIS,
                         font = list(family = FONT, size = fsz(-1), color = INK)),
       showlegend = legend,
-      legend = list(orientation = "h", x = 0, y = 1.02, yanchor = "bottom",
-                    font = list(size = fsz(-1), color = INK2)),
+      legend = leg,
       ...
     ) |>
     config(displaylogo = FALSE,
@@ -482,6 +494,45 @@ pdf_size_inputs <- function(prefix, w = 10, h = 6) {
 
 section_note <- function(...) div(class = "section-note", ...)
 
+# Tutorial pop-up: loads tutorial.mp4 and tutorial_chapters.json from the
+# published site folder (the page that hosts the Shinylive app), and builds the
+# chapter list with clickable timestamps.
+tutorial_js <- "
+(function () {
+  var base;
+  try { base = window.parent.location.href; } catch (e) { base = window.location.href; }
+  var v = document.getElementById('tutorial_video');
+  var list = document.getElementById('tutorial_chapters');
+  var fail = function () {
+    list.innerHTML = '<li class=\"section-note\">The tutorial video is available on the published MagnaGenes website.</li>';
+    v.style.display = 'none';
+  };
+  v.onerror = fail;
+  v.src = new URL('tutorial.mp4', base).href;
+  var fmt = function (s) { s = Math.round(s); return Math.floor(s / 60) + ':' + ('0' + (s % 60)).slice(-2); };
+  fetch(new URL('tutorial_chapters.json', base).href, { cache: 'no-cache' })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (ch) {
+      list.innerHTML = '';
+      ch.forEach(function (c) {
+        var li = document.createElement('li');
+        var a = document.createElement('a');
+        a.href = '#'; a.innerHTML = '<span class=\"tutorial-time\">' + fmt(c.time) + '</span> ' + c.title;
+        a.onclick = function (e) { e.preventDefault(); v.currentTime = c.time; v.play(); };
+        li.appendChild(a); list.appendChild(li);
+      });
+      v.ontimeupdate = function () {
+        var items = list.querySelectorAll('li');
+        ch.forEach(function (c, i) {
+          var next = ch[i + 1] ? ch[i + 1].time : Infinity;
+          items[i].classList.toggle('active', v.currentTime >= c.time && v.currentTime < next);
+        });
+      };
+    })
+    .catch(fail);
+})();
+"
+
 # =============================================================================
 # STYLES
 # =============================================================================
@@ -581,7 +632,10 @@ textarea::placeholder, input::placeholder, .selectize-input input::placeholder {
 .rt-table { font-size: .92rem; }
 
 /* ---- Experiment plots (one framed plot per dataset) ---- */
-.exp-plot { border: 1.5px solid var(--frame); border-radius: 8px; padding: .7rem .8rem .3rem; margin-bottom: 1rem; background: var(--surface); }
+.exp-plot { border: 1.5px solid var(--frame); border-radius: 8px; padding: .7rem .8rem .3rem; margin-bottom: 1rem; background: var(--surface); max-width: 100%; }
+.exp-grid { display: flex; flex-wrap: wrap; gap: 0 1rem; align-items: flex-start; }
+.exp-grid .exp-plot { overflow-x: auto; }
+.exp-plot-note { font-size: .82rem; color: var(--muted); margin: -.1rem 0 .3rem; }
 .exp-plot-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem; margin-bottom: .2rem; }
 .exp-plot-head h5 { margin: 0; font-weight: 700; font-size: 1.08rem; color: var(--ink); }
 .exp-plot-head .ref { font-size: .88rem; color: var(--ink-2); }
@@ -605,7 +659,16 @@ details > summary { cursor: pointer; color: var(--brand-dark); font-weight: 600;
 .shiny-output-error-validation { color: var(--ink-2); font-size: 1rem; padding: 1.5rem; text-align: center; }
 .peptide-box { max-height: 260px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-family: var(--mono); font-size: .82rem; }
 .peptide-box .checkbox { margin: .1rem 0; }
+.peptide-seq { font-family: var(--mono); font-size: .9rem; color: var(--ink); word-break: break-all; margin: .1rem 0 .1rem; }
 .recalculating { opacity: .45; transition: opacity .25s; }
+.tutorial-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 1rem; align-items: start; }
+@media (max-width: 900px) { .tutorial-wrap { grid-template-columns: 1fr; } }
+.tutorial-wrap video { width: 100%; border-radius: 8px; border: 1px solid var(--line); background: #000; }
+.tutorial-chapters ol { list-style: none; padding: 0; margin: 0; }
+.tutorial-chapters li a { display: block; padding: .35rem .5rem; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: .93rem; }
+.tutorial-chapters li a:hover { background: var(--surface-2); }
+.tutorial-chapters li.active a { background: var(--chip-ok); color: var(--brand-dark); font-weight: 600; }
+.tutorial-time { font-family: var(--mono); color: var(--brand-dark); font-size: .85rem; margin-right: .3rem; }
 ")
 
 
@@ -669,18 +732,24 @@ home_panel <- nav_panel(
     div(class = "home-split",
       div(class = "infobox credit-box",
         h4("Information"),
-        p("MagnaGenes is developed at the ",
-          tags$a("Talbot lab, The Sainsbury Laboratory", href = TSL_URL, target = "_blank", rel = "noopener"),
-          ", with the aim of providing a one-stop platform for rice blast research and promoting open science."),
-        p("We provide MagnaGenes to the community as part of the OpenRiceBlast and OpenWheatBlast initiatives. ",
-          "We aim to release regular updates to MagnaGenes and welcome additions or corrections from the blast research community to expand the database.")),
+        p("MagnaGenes is developed and maintained by the Nick Talbot Lab at ",
+          tags$a("The Sainsbury Laboratory", href = TSL_URL, target = "_blank", rel = "noopener", .noWS = "after"),
+          ". It aims to provide a one-stop platform for rice blast research and to promote open science."),
+        p("MagnaGenes is freely available to the community as part of the ",
+          tags$a("OpenRiceBlast", href = OPENRICEBLAST_URL, target = "_blank", rel = "noopener"), " and ",
+          tags$a("OpenWheatBlast", href = OPENWHEATBLAST_URL, target = "_blank", rel = "noopener"),
+          " initiatives. The database is updated regularly, and additions or corrections from the blast research community are welcome.")),
       div(class = "infobox",
         h4("Help us grow MagnaGenes"),
-        p("Join our community of curators and help extend the MagnaGenes database. ",
+        p("Join the community of curators and help extend the MagnaGenes database. ",
           tags$a("Share your data and insights", target = "_blank", rel = "noopener",
-                 href = "https://docs.google.com/spreadsheets/d/1Zx-qdqlpkeoYlIeAlOVXnHNzLs95kjwhQWP-uXLioP0/edit?gid=0#gid=0"),
+                 href = "https://docs.google.com/spreadsheets/d/1Zx-qdqlpkeoYlIeAlOVXnHNzLs95kjwhQWP-uXLioP0/edit?gid=0#gid=0",
+                 .noWS = "after"),
           "."),
-        p(class = "section-note mb-0", "Questions or support: ", tags$strong("neha.sahu.tsl@gmail.com")))
+        p("If something does not work as expected, if you spot an error in the data, or if you have a question or a suggestion, please write to ",
+          tags$a(CONTACT_EMAIL, href = paste0("mailto:", CONTACT_EMAIL), .noWS = "after"), "."),
+        p(class = "section-note mb-0",
+          "Please include the gene IDs, the tab you were using and, if possible, a screenshot, so the problem can be reproduced."))
     )
   )
 )
@@ -751,9 +820,9 @@ tx_panel <- nav_panel(
                          choiceValues = EXP_INFO$experiment, selected = EXP_INFO$experiment),
       div(class = "section-note mb-2",
           "Expression values come from RNA-seq data reanalysed from the publications linked above."),
-      radioButtons("tx_scale", "Values", choices = c(
-        "log₂(TPM + 1)" = "log", "TPM" = "tpm", "Row z-score (of log₂)" = "z"),
-        selected = "log"),
+      div(class = "sidebar-heading mt-2", "Plot options"),
+      checkboxInput("tx_box", "Line plots: show box plot of all genes", FALSE),
+      checkboxInput("tx_heat_values", "Heatmaps: show TPM values in cells", FALSE),
       checkboxInput("tx_cluster", "Cluster genes (heatmap, correlation)", TRUE),
       actionButton("tx_go", "Plot expression", icon = icon("chart-line"), class = "btn-primary w-100"),
       div(class = "sidebar-heading mt-3", "Download"),
@@ -769,18 +838,23 @@ tx_panel <- nav_panel(
     navset_card_underline(
       id = "tx_view",
       nav_panel("Expression profiles", value = "profiles",
-        div(class = "plot-note", "One plot per experiment. Each line is a gene; values are on the scale chosen in the sidebar."),
+        div(class = "plot-note",
+            "One plot per experiment. Each line is a gene (TPM, transcripts per million). Error bars show the standard deviation ",
+            "of biological replicates where replicate values are available; otherwise the points are averaged TPM from the biological replicates. ",
+            "Tick \"show box plot\" in the sidebar to add the spread of all selected genes at each time point."),
         uiOutput("tx_profiles_ui")),
       nav_panel("Heatmap", value = "heatmap",
         div(class = "plot-note",
-            "One heatmap per experiment, each with its own colour scale (blue low, white mid, red high). ",
+            "One heatmap per experiment. Values are row z-scores: each gene's log₂(TPM + 1) values are centred and scaled ",
+            "within the experiment, so colour shows when a gene is high (red) or low (blue) relative to its own average. ",
             "Genes are in the same order in every plot so rows can be compared."),
         uiOutput("tx_heat_ui")),
       nav_panel("Gene-gene correlation", value = "corr",
         div(class = "plot-note",
             "How similar the expression patterns of each pair of genes are across the selected conditions. ",
-            "Each cell is the Pearson correlation coefficient (r) of log₂(TPM + 1) values: r = 1 (yellow) means the two genes rise and fall together, ",
-            "r = 0 means no linear relationship and r = −1 (purple) means opposite patterns."),
+            "Each cell is the Pearson correlation coefficient (r) of log₂(TPM + 1) values: r = 1 means the two genes rise and fall together, ",
+            "r = 0 means no linear relationship and r = −1 means opposite patterns. ",
+            "The colour scale spans only the range of r in the genes you selected (purple lowest, yellow highest), so small differences stay visible."),
         uiOutput("tx_corr_ui")),
       nav_panel("Data table", value = "table", reactableOutput("tx_table"))
     )
@@ -816,7 +890,7 @@ ph_panel <- nav_panel(
       nav_panel("Phosphosite abundance", value = "profiles",
         div(class = "plot-note",
             "Normalised abundance of each phosphopeptide in Guy11 (greens) and Δpmk1 (greys) during appressorium development ",
-            "on a hydrophobic surface. Each bar is one biological replicate."),
+            "on a hydrophobic surface. One plot per phosphopeptide, with Guy11 above Δpmk1 on the same scale; each bar is one biological replicate."),
         uiOutput("ph_profiles_ui")),
       nav_panel("Abundance heatmap", value = "heatmap",
         div(class = "plot-note", "Mean abundance of every phosphopeptide of this protein. Guy11 and Δpmk1 share one value range."),
@@ -826,7 +900,12 @@ ph_panel <- nav_panel(
         div(class = "d-flex flex-wrap gap-3 align-items-end",
             selectInput("ph_map_time", "Fold change at", width = "200px",
                         choices = c("Largest change" = "max", setNames(HPI, paste(HPI, "hpi"))))),
-        plotlyOutput("ph_map", height = "420px")),
+        div(class = "plot-note",
+            "Each lollipop is a localised phosphosite, labelled with its residue (for example pS358). Height is the log₂ fold change ",
+            "in Δpmk1 relative to Guy11 at the chosen time point; colour shows whether the change is significant. ",
+            "The track below shows the protein with its Pfam domains; triangles mark the sites."),
+        plotlyOutput("ph_map", height = "520px"),
+        uiOutput("ph_map_domains")),
       nav_panel("Statistics", value = "table", reactableOutput("ph_table"),
         div(class = "method-box",
             "Welch two-sample t-test per phosphopeptide and time point on log₂ abundance (n = 3 biological replicates per group), ",
@@ -863,8 +942,8 @@ og_panel <- nav_panel(
         div(class = "plot-note",
             "How many orthologs of each query gene are found in 42 fungal genomes. Species are arranged on the species tree (left). ",
             "Each column is one ", tags$em("M. oryzae"), " gene and its orthogroup; each cell is the number of genes from that species in the orthogroup. ",
-            "Cells take the colour of the species' lifestyle and get darker with more copies; empty cells mean no ortholog. ",
-            "The strips on the right show lifestyle and appressorium type. Based on genome-wide orthogroup inference across the 42 proteomes and the species tree from MagnaGenes v1.0."),
+            "Cells take the colour of the species' lifestyle, in deeper shades of that colour with more copies; empty cells mean no ortholog. ",
+            "The strips on the right show lifestyle and appressorium type (blank: no appressorium). Based on genome-wide orthogroup inference across the 42 proteomes and the species tree from MagnaGenes v1.0."),
         uiOutput("og_plot_ui")),
       nav_panel("Conservation by lifestyle", value = "lifestyle",
         div(class = "plot-note", "Share of species in each lifestyle group with at least one ortholog (",
@@ -982,7 +1061,8 @@ about_panel <- nav_panel(
     ),
     div(class = "infobox",
       h4("Contact"),
-      p("For questions or support, please contact the development team at ", tags$strong("neha.sahu.tsl@gmail.com"), "."),
+      p("For questions, problems or suggestions, please write to ",
+        tags$a(CONTACT_EMAIL, href = paste0("mailto:", CONTACT_EMAIL), .noWS = "after"), "."),
       p(class = "section-note mb-0", "Version ", APP_VERSION, ". Built with R, Shiny, bslib, plotly, ggplot2 and reactable.")
     )
   )
@@ -990,7 +1070,7 @@ about_panel <- nav_panel(
 
 ui <- page_navbar(
   id = "main_nav",
-  title = tags$span(tags$span(class = "brand-mark", "M"), "MagnaGenes",
+  title = tags$span("MagnaGenes",
                     tags$span(class = "brand-version", paste0("v", APP_VERSION))),
   window_title = "MagnaGenes v2.0",
   theme = bs_theme(version = 5, bootswatch = "flatly", primary = BRAND, success = BRAND,
@@ -1004,11 +1084,13 @@ ui <- page_navbar(
                      tags$style(app_css),
                      tags$meta(name = "description", content = "MagnaGenes v2.0: multi-omics explorer for Magnaporthe oryzae")),
   footer = div(class = "footer-note",
-               "MagnaGenes v", APP_VERSION, ". Runs entirely in your browser via Shinylive."),
+               paste0("MagnaGenes v", APP_VERSION, ". Runs entirely in your browser via Shinylive.")),
   home_panel, search_panel, tx_panel, ph_panel, og_panel, go_panel,
   nav_spacer(),
   nav_item(actionLink("reset_app", tagList(icon("rotate-left"), "Reset"), class = "nav-link",
                       title = "Clear all searches and start again")),
+  nav_item(actionLink("tutorial", tagList(icon("circle-play"), "Tutorial"), class = "nav-link",
+                      title = "Video tour of MagnaGenes")),
   nav_item(input_dark_mode(id = "dark_mode", mode = "light")),
   about_panel
 )
@@ -1028,6 +1110,22 @@ server <- function(input, output, session) {
 
   # Reset: start a fresh session (packages stay loaded, so this is quick)
   observeEvent(input$reset_app, session$reload())
+
+  # Tutorial: video tour with clickable chapters. The video and its chapter list
+  # sit next to the published site (see build_site.R), not in the app bundle, so
+  # they are only downloaded when the tutorial is opened.
+  observeEvent(input$tutorial, {
+    showModal(modalDialog(
+      title = tagList(icon("circle-play"), " MagnaGenes video tutorial"),
+      size = "xl", easyClose = TRUE, footer = modalButton("Close"),
+      div(class = "tutorial-wrap",
+          tags$video(id = "tutorial_video", controls = NA, preload = "metadata", playsinline = NA),
+          div(class = "tutorial-chapters",
+              div(class = "sidebar-heading", "Chapters"),
+              tags$ol(id = "tutorial_chapters", tags$li(class = "section-note", "Loading...")))),
+      tags$script(HTML(tutorial_js))
+    ))
+  })
 
   send_genes <- function(ids, target_input, target_tab, run_input = NULL) {
     updateTextAreaInput(session, target_input, value = paste(ids, collapse = "\n"))
@@ -1253,8 +1351,10 @@ server <- function(input, output, session) {
   }
 
   # Call first in every plot: sets the light/dark colours and the font size
-  plot_setup <- function(id, base = 15) {
-    options(mg.dark = identical(input$dark_mode, "dark"), mg.fs = responsive_font(id, base))
+  # fixed: use this font size instead of scaling with width (for plots sized to their content)
+  plot_setup <- function(id, base = 15, fixed = NULL) {
+    options(mg.dark = identical(input$dark_mode, "dark"),
+            mg.fs = if (is.null(fixed)) responsive_font(id, base) else fixed)
     invisible(fsz(0))
   }
 
@@ -1444,28 +1544,32 @@ server <- function(input, output, session) {
     exps <- EXP_INFO$experiment[EXP_INFO$experiment %in% input$tx_exps]
     cd <- expr$conditions[expr$conditions$experiment %in% exps, ]
     list(ids = ids, exps = exps, missing = c(p$missing, setdiff(p$ids, rownames(expr$tpm))), cond = cd,
-         m = expr$tpm[ids, cd$id, drop = FALSE])
+         m = expr$tpm[ids, cd$id, drop = FALSE],
+         sd = if (!is.null(expr$sd)) expr$sd[ids, cd$id, drop = FALSE] else NULL)
   }, ignoreNULL = FALSE)
 
-  # Values on the chosen scale; z-scores are computed within each experiment
-  tx_values <- reactive({
+  # Row z-scores of log2(TPM + 1), computed within each experiment
+  tx_z <- reactive({
     q <- tx_query()
-    if (input$tx_scale != "z") return(transform_expr(q$m, input$tx_scale))
     v <- q$m
     for (e in q$exps) {
       k <- q$cond$experiment == e
-      v[, k] <- transform_expr(q$m[, k, drop = FALSE], "z")
+      v[, k] <- row_z(q$m[, k, drop = FALSE])
     }
     v
   })
 
   tx_long <- reactive({
-    q <- tx_query(); v <- tx_values()
-    data.frame(gene = rep(q$ids, times = ncol(v)),
-               name = rep(ifelse(is.na(first_name[q$ids]), "", first_name[q$ids]), times = ncol(v)),
-               experiment = rep(q$cond$experiment, each = nrow(v)),
-               sample = rep(q$cond$sample, each = nrow(v)),
-               TPM = as.vector(q$m), value = round(as.vector(v), 4),
+    q <- tx_query(); z <- tx_z()
+    n <- length(q$m)
+    data.frame(gene = rep(q$ids, times = ncol(z)),
+               name = rep(ifelse(is.na(first_name[q$ids]), "", first_name[q$ids]), times = ncol(z)),
+               experiment = rep(q$cond$experiment, each = nrow(z)),
+               sample = rep(q$cond$sample, each = nrow(z)),
+               TPM = as.vector(q$m),
+               SD = if (is.null(q$sd)) rep(NA_real_, n) else as.vector(q$sd),
+               log2_TPM_plus_1 = round(log2(as.vector(q$m) + 1), 4),
+               row_z_score = round(as.vector(z), 4),
                stringsAsFactors = FALSE)
   })
 
@@ -1477,39 +1581,64 @@ server <- function(input, output, session) {
       if (length(q$missing)) span(class = "chip warn", icon("triangle-exclamation"), tags$b(length(q$missing)),
                                   "not found:", paste(head(q$missing, 6), collapse = ", ")),
       if (length(q$ids) > 8) span(class = "chip", icon("circle-info"),
-                                  "Profiles show the first 8 genes; the heatmaps show all."))
+                                  "Line plots show the first 8 genes; box plots and heatmaps use all."))
   })
 
+  exp_has_reps <- function(e) isTRUE(EXP_INFO$has_replicates[match(e, EXP_INFO$experiment)])
+  exp_n_samples <- function(e) sum(expr$conditions$experiment == e)
+
+  # Plot widths follow the number of samples, so few time points are not stretched
+  tx_prof_width <- function(e, ids) {
+    leg <- 40 + 8.5 * max(nchar(gene_short(head(ids, 8))), 12)
+    as.integer(max(460, 95 + 78 * exp_n_samples(e) + leg))
+  }
+  tx_heat_width <- function(e, ids) {
+    lab <- 20 + 8.5 * max(nchar(gene_short(ids)))
+    as.integer(max(380, lab + 64 * exp_n_samples(e) + 110))
+  }
+
   # A framed block per experiment: title, paper link and the plot
-  exp_frame <- function(e, plot_ui) {
+  exp_frame <- function(e, plot_ui, width = NULL, note = NULL) {
     info <- EXP_INFO[EXP_INFO$experiment == e, ]
-    div(class = "exp-plot",
+    div(class = "exp-plot", style = if (!is.null(width)) sprintf("width: %dpx;", width + 30),
         div(class = "exp-plot-head",
             tags$h5(info$label),
             span(class = "ref",
                  if (nzchar(info$description %||% "")) paste0(info$description, ". "),
                  "Reanalysed from ",
-                 if (nzchar(info$url %||% "")) tags$a(href = info$url, target = "_blank", rel = "noopener", info$reference)
+                 if (nzchar(info$url %||% "")) tags$a(href = info$url, target = "_blank", rel = "noopener", info$reference,
+                                                     .noWS = "after")
                  else info$reference, ".")),
+        if (!is.null(note)) div(class = "exp-plot-note", note),
         plot_ui)
   }
   exp_index <- function(e) match(e, EXP_INFO$experiment)
 
+  rep_note <- function(e) {
+    if (exp_has_reps(e)) "Points: mean TPM; error bars: standard deviation of biological replicates."
+    else "Points: averaged TPM from biological replicates (replicate values not available, so no error bars)."
+  }
+
   output$tx_profiles_ui <- renderUI({
     q <- tx_query()
-    tagList(lapply(q$exps, function(e)
-      exp_frame(e, plotlyOutput(paste0("tx_prof_", exp_index(e)), height = "340px"))))
+    div(class = "exp-grid", lapply(q$exps, function(e) {
+      w <- tx_prof_width(e, q$ids)
+      exp_frame(e, plotlyOutput(paste0("tx_prof_", exp_index(e)), width = paste0(w, "px"), height = "400px"),
+                width = w, note = rep_note(e))
+    }))
   })
 
   output$tx_heat_ui <- renderUI({
     q <- tx_query()
-    h <- paste0(max(200, 120 + 24 * length(q$ids)), "px")
-    tagList(lapply(q$exps, function(e)
-      exp_frame(e, plotlyOutput(paste0("tx_heat_", exp_index(e)), height = h))))
+    h <- paste0(max(240, 130 + 26 * length(q$ids)), "px")
+    div(class = "exp-grid", lapply(q$exps, function(e) {
+      w <- tx_heat_width(e, q$ids)
+      exp_frame(e, plotlyOutput(paste0("tx_heat_", exp_index(e)), width = paste0(w, "px"), height = h), width = w)
+    }))
   })
 
   tx_heat_order <- reactive({
-    v <- tx_values()
+    v <- tx_z()
     if (isTRUE(input$tx_cluster)) cluster_order(v) else seq_len(nrow(v))
   })
 
@@ -1520,51 +1649,63 @@ server <- function(input, output, session) {
     hid <- paste0("tx_heat_", k)
 
     output[[pid]] <- renderPlotly({
-      plot_setup(pid)
+      plot_setup(pid, fixed = 15)
       q <- tx_query(); req(e %in% q$exps)
       d <- tx_long(); d <- d[d$experiment == e, ]
-      scale <- input$tx_scale
       lev <- expr$conditions$sample[expr$conditions$experiment == e]
       ids <- head(q$ids, 8)
+      reps <- exp_has_reps(e)
       p <- plot_ly()
+      if (isTRUE(input$tx_box)) {
+        p <- p |> add_trace(
+          x = d$sample, y = d$TPM, type = "box", name = paste0("All genes (n = ", length(q$ids), ")"),
+          fillcolor = "rgba(138, 137, 132, 0.16)", line = list(color = MUTED, width = 1.3),
+          marker = list(color = MUTED, size = 4, opacity = 0.7), boxpoints = "outliers",
+          hoverinfo = "y")
+      }
       for (j in seq_along(ids)) {
         dj <- d[d$gene == ids[j], ]
         dj <- dj[match(lev, dj$sample), ]
         p <- p |> add_trace(
-          x = dj$sample, y = dj$value, type = "scatter", mode = "lines+markers", name = gene_short(ids[j]),
+          x = dj$sample, y = dj$TPM, type = "scatter", mode = "lines+markers", name = gene_short(ids[j]),
           line = list(color = SERIES[j], width = 2.5),
           marker = list(color = SERIES[j], size = 9, line = list(color = SURFACE, width = 1.5)),
-          customdata = round(dj$TPM, 2),
-          hovertemplate = paste0("<b>", gene_short(ids[j]), "</b><br>%{x}<br>",
-                                 scale_label[[scale]], ": %{y:.2f}<br>TPM: %{customdata}<extra></extra>"))
+          error_y = if (reps) list(type = "data", array = dj$SD, color = SERIES[j], thickness = 1.3, width = 4),
+          customdata = if (reps) round(dj$SD, 2) else rep("", nrow(dj)),
+          hovertemplate = paste0("<b>", gene_short(ids[j]), "</b><br>%{x}<br>TPM: %{y:.2f}",
+                                 if (reps) "<br>SD: %{customdata}", "<extra></extra>"))
       }
       p |> finish_plot(paste0("expression_profiles_", make.names(EXP_SHORT[[e]])),
-                       xaxis = ax(NULL, categoryorder = "array", categoryarray = lev, showgrid = FALSE),
-                       yaxis = ax(scale_label[[scale]]),
-                       legend = list(orientation = "v", x = 1.01, y = 1, yanchor = "top", xanchor = "left",
+                       xaxis = ax(NULL, type = "category", categoryorder = "array", categoryarray = lev,
+                                  showgrid = FALSE),
+                       yaxis = ax(if (reps) "TPM (mean ± SD)" else "TPM", rangemode = "tozero"),
+                       legend = list(orientation = "v", x = 1.02, y = 1, yanchor = "top", xanchor = "left",
                                      font = list(size = fsz(-1), color = INK2)),
                        margin = list(t = 10, r = 10, b = 50, l = 60))
     })
 
     output[[hid]] <- renderPlotly({
-      plot_setup(hid)
+      plot_setup(hid, fixed = 15)
       q <- tx_query(); req(e %in% q$exps)
-      scale <- input$tx_scale
       k_col <- q$cond$experiment == e
       ord <- tx_heat_order()
-      v <- tx_values()[ord, k_col, drop = FALSE]
+      v <- tx_z()[ord, k_col, drop = FALSE]
       tpm <- q$m[ord, k_col, drop = FALSE]
       smp <- q$cond$sample[k_col]
       ylab <- gene_short(rownames(v))
-      hover <- matrix(sprintf("<b>%s</b><br>%s<br>TPM: %s<br>%s: %s", rep(ylab, ncol(v)), rep(smp, each = nrow(v)),
-                              signif(as.vector(tpm), 4), scale_label[[scale]], round(as.vector(v), 2)),
+      hover <- matrix(sprintf("<b>%s</b><br>%s<br>TPM: %s<br>Row z-score: %s", rep(ylab, ncol(v)),
+                              rep(smp, each = nrow(v)), signif(as.vector(tpm), 4), round(as.vector(v), 2)),
                       nrow = nrow(v))
-      rng <- range(v, na.rm = TRUE)
-      if (scale == "z") { lim <- max(abs(rng), 1e-9); rng <- c(-lim, lim) }
-      if (!all(is.finite(rng)) || diff(rng) == 0) rng <- c(min(rng, 0, na.rm = TRUE), max(rng, 1, na.rm = TRUE))
-      plot_ly(x = smp, y = ylab, z = v, type = "heatmap", text = hover, hoverinfo = "text",
-              colorscale = colorscale(BWR_RAMP), zmin = rng[1], zmax = rng[2], xgap = 2, ygap = 2,
-              colorbar = list(title = list(text = scale_label[[scale]], side = "right",
+      lim <- suppressWarnings(max(abs(v), na.rm = TRUE))
+      if (!is.finite(lim) || lim == 0) lim <- 1
+      show_vals <- isTRUE(input$tx_heat_values)
+      plot_ly(x = smp, y = ylab, z = v, type = "heatmap", customdata = hover,
+              hovertemplate = "%{customdata}<extra></extra>",
+              text = if (show_vals) matrix(fmt_tpm(tpm), nrow = nrow(v)),
+              texttemplate = if (show_vals) "%{text}",
+              textfont = list(size = fsz(-2), family = FONT),
+              colorscale = colorscale(BWR_RAMP), zmin = -lim, zmax = lim, xgap = 2, ygap = 2,
+              colorbar = list(title = list(text = "Row<br>z-score", side = "top",
                                            font = list(size = fsz(-1), color = INK2)),
                               tickfont = list(size = fsz(-2), color = INK2), thickness = 14, len = 0.9)) |>
         finish_plot(paste0("expression_heatmap_", make.names(EXP_SHORT[[e]])), legend = FALSE,
@@ -1588,6 +1729,17 @@ server <- function(input, output, session) {
     cm[ord, ord, drop = FALSE]
   })
 
+  # Colour range of the correlation map: from the lowest r among the selected
+  # genes (rounded down to 0.05) up to 1
+  corr_range <- function(cm) {
+    off <- cm[upper.tri(cm)]
+    lo <- suppressWarnings(min(off, na.rm = TRUE))
+    if (!is.finite(lo)) return(c(-1, 1))
+    lo <- max(-1, floor(lo * 20) / 20)
+    if (lo > 0.95) lo <- 0.95
+    c(lo, 1)
+  }
+
   output$tx_corr_ui <- renderUI({
     n <- length(tx_query()$ids)
     plotlyOutput("tx_corr", height = paste0(min(1000, max(560, 260 + 38 * n)), "px"))
@@ -1595,9 +1747,10 @@ server <- function(input, output, session) {
   output$tx_corr <- renderPlotly({
     plot_setup("tx_corr")
     cm <- tx_corr_data(); lab <- gene_short(rownames(cm))
+    rng <- corr_range(cm)
     hover <- matrix(sprintf("%s<br>%s<br>Pearson r = %s", rep(lab, ncol(cm)), rep(lab, each = nrow(cm)),
                             round(as.vector(cm), 3)), nrow = nrow(cm))
-    plot_ly(x = lab, y = lab, z = cm, type = "heatmap", zmin = -1, zmax = 1, text = hover, hoverinfo = "text",
+    plot_ly(x = lab, y = lab, z = cm, type = "heatmap", zmin = rng[1], zmax = rng[2], text = hover, hoverinfo = "text",
             colorscale = colorscale(VIRIDIS), xgap = 2, ygap = 2,
             colorbar = list(title = list(text = "Pearson r", side = "right"), thickness = 14, len = 0.6)) |>
       finish_plot("expression_correlation", legend = FALSE,
@@ -1608,23 +1761,28 @@ server <- function(input, output, session) {
 
   output$tx_table <- renderReactable({
     d <- tx_long()
-    names(d)[names(d) == "value"] <- scale_label[[input$tx_scale]]
+    has_sd <- any(!is.na(d$SD))
     reactable(d, searchable = TRUE, compact = TRUE, highlight = TRUE, defaultPageSize = 20,
               filterable = TRUE,
               columns = list(gene = colDef(name = "Gene", cell = function(v) tags$span(class = "gene-id", v)),
-                             TPM = colDef(format = colFormat(digits = 2)),
-                             experiment = colDef(name = "Experiment", minWidth = 180)))
+                             name = colDef(name = "Name"),
+                             experiment = colDef(name = "Experiment", minWidth = 180),
+                             sample = colDef(name = "Sample"),
+                             TPM = colDef(name = if (has_sd) "TPM (mean)" else "TPM (averaged)", format = colFormat(digits = 2)),
+                             SD = colDef(show = has_sd, format = colFormat(digits = 2)),
+                             log2_TPM_plus_1 = colDef(name = "log₂(TPM + 1)", format = colFormat(digits = 2)),
+                             row_z_score = colDef(name = "Row z-score", format = colFormat(digits = 2))))
   })
 
   output$tx_dl_long <- downloadHandler(
     filename = function() paste0("MagnaGenes_expression_long_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
     content = function(file) write_tsv(tx_long(), file))
   output$tx_dl_wide <- downloadHandler(
-    filename = function() paste0("MagnaGenes_expression_matrix_", input$tx_scale, "_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    filename = function() paste0("MagnaGenes_expression_matrix_TPM_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
     content = function(file) {
-      q <- tx_query(); v <- tx_values()
+      q <- tx_query(); v <- q$m
       colnames(v) <- q$cond$id
-      write_tsv(data.frame(gene = rownames(v), name = first_name[rownames(v)], round(v, 4),
+      write_tsv(data.frame(gene = rownames(v), name = first_name[rownames(v)], v,
                            check.names = FALSE), file)
     })
   output$tx_dl_fasta <- downloadHandler(
@@ -1632,35 +1790,48 @@ server <- function(input, output, session) {
     content = function(file) writeLines(fasta_text(tx_query()$ids, "protein"), file))
 
   tx_gg <- function() {
-    view <- input$tx_view %||% "profiles"; scale <- input$tx_scale
+    view <- input$tx_view %||% "profiles"
     q <- tx_query()
     if (view %in% c("profiles", "table")) {
-      d <- tx_long()
-      ids <- head(unique(d$gene), 8)
-      d <- d[d$gene %in% ids, ]
+      d_all <- tx_long()
+      d_all$experiment <- factor(EXP_PARSE[d_all$experiment], EXP_PARSE[q$exps])
+      d_all$sample <- factor(d_all$sample, expr$sample_levels)
+      ids <- head(unique(d_all$gene), 8)
+      d <- d_all[d_all$gene %in% ids, ]
       d$label <- factor(gene_short(d$gene), gene_short(ids))
-      d$experiment <- factor(EXP_PARSE[d$experiment], EXP_PARSE[q$exps])
-      d$sample <- factor(d$sample, expr$sample_levels)
-      ggplot(d, aes(sample, value, colour = label, group = label)) +
-        geom_line(linewidth = 0.6) + geom_point(size = 1.8) +
+      g <- ggplot(d, aes(sample, TPM, colour = label, group = label))
+      if (isTRUE(input$tx_box))
+        g <- g + geom_boxplot(data = d_all, aes(sample, TPM, group = sample), inherit.aes = FALSE,
+                              fill = "grey90", colour = "grey55", width = 0.6, outlier.size = 0.6)
+      if (any(!is.na(d$SD)))
+        g <- g + geom_errorbar(aes(ymin = pmax(0, TPM - SD), ymax = TPM + SD), width = 0.2, linewidth = 0.4,
+                               na.rm = TRUE)
+      g + geom_line(linewidth = 0.6) + geom_point(size = 1.8) +
         facet_wrap(~experiment, scales = "free", labeller = label_parsed) +
         scale_colour_manual(values = SERIES) +
-        labs(x = NULL, y = pdf_safe(scale_label[[scale]]), colour = NULL) +
+        scale_y_continuous(limits = c(0, NA)) +
+        labs(x = NULL, y = if (any(!is.na(d$SD))) "TPM (mean +/- SD)" else "TPM (averaged from biological replicates)",
+             colour = NULL) +
         theme_mg() + theme(axis.text.x = element_text(angle = 45, hjust = 1),
                            panel.border = element_rect(colour = "black", linewidth = 0.6, fill = NA))
     } else if (view == "heatmap") {
-      # One heatmap per experiment, each with its own colour scale, stacked
+      # One heatmap per experiment, each on its own z-score range, stacked
       ord <- tx_heat_order()
-      v_all <- tx_values()[ord, , drop = FALSE]
+      v_all <- tx_z()[ord, , drop = FALSE]
+      tpm_all <- q$m[ord, , drop = FALSE]
+      show_vals <- isTRUE(input$tx_heat_values)
       plots <- lapply(q$exps, function(e) {
         k <- q$cond$experiment == e
         v <- v_all[, k, drop = FALSE]
         d <- data.frame(gene = factor(rep(gene_short(rownames(v)), ncol(v)), rev(gene_short(rownames(v)))),
                         sample = factor(rep(q$cond$sample[k], each = nrow(v)), q$cond$sample[k]),
-                        value = as.vector(v))
-        lim <- if (scale == "z") max(abs(d$value), na.rm = TRUE) * c(-1, 1) else range(d$value, na.rm = TRUE)
+                        value = as.vector(v), tpm = fmt_tpm(as.vector(tpm_all[, k])))
+        lim <- suppressWarnings(max(abs(d$value), na.rm = TRUE))
+        if (!is.finite(lim) || lim == 0) lim <- 1
         ggplot(d, aes(sample, gene, fill = value)) + geom_tile(colour = "white", linewidth = 0.4) +
-          scale_fill_gradientn(colours = BWR_RAMP, limits = lim, name = pdf_safe(scale_label[[scale]])) +
+          (if (show_vals) geom_text(aes(label = tpm), size = 2.2, colour = "#1d2b2a")) +
+          scale_fill_gradientn(colours = BWR_RAMP, limits = c(-lim, lim), name = "Row z-score",
+                               na.value = "#f2f2ef") +
           labs(x = NULL, y = NULL, title = parse(text = EXP_PARSE[[e]])[[1]]) + theme_mg(9) +
           theme(panel.grid = element_blank(), legend.position = "right",
                 panel.border = element_rect(colour = "black", linewidth = 0.6, fill = NA))
@@ -1675,7 +1846,7 @@ server <- function(input, output, session) {
       d <- data.frame(a = factor(rep(lab, ncol(cm)), lab), b = factor(rep(lab, each = nrow(cm)), rev(lab)),
                       r = as.vector(cm))
       ggplot(d, aes(a, b, fill = r)) + geom_tile(colour = "white", linewidth = 0.3) +
-        scale_fill_gradientn(colours = VIRIDIS, limits = c(-1, 1), name = "Pearson r") +
+        scale_fill_gradientn(colours = VIRIDIS, limits = corr_range(cm), oob = scales::squish, name = "Pearson r") +
         labs(x = NULL, y = NULL, caption = "Pearson correlation of log2(TPM + 1) across the selected conditions") +
         coord_equal() + theme_mg() +
         theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank(),
@@ -1797,64 +1968,61 @@ server <- function(input, output, session) {
 
   ph_x_axis <- function(title = "Hours post inoculation") ax(title, tickvals = HPI, ticktext = HPI, showgrid = FALSE)
 
-  output$ph_profiles_ui <- renderUI({
-    n <- length(ph_selected())
-    plotlyOutput("ph_profiles", height = paste0(110 + 250 * n, "px"))
-  })
-  # Bar chart per phosphopeptide (as in MagnaGenes v1.0): Guy11 and delta-pmk1 side by
-  # side, one bar per biological replicate, greens for Guy11 and greys for delta-pmk1
-  output$ph_profiles <- renderPlotly({
-    plot_setup("ph_profiles")
-    pids <- ph_selected()
-    d <- ph_long_all(); d <- d[d$pid %in% pids, ]
+  # One framed plot per phosphopeptide: site and full peptide in the header,
+  # Guy11 (greens) above delta-pmk1 (greys), one bar per biological replicate
+  ph_bar_plot <- function(pid, file) {
+    d <- ph_long_all(); d <- d[d$pid == pid, ]
     d$value <- ph_value(d$abundance)
     reps <- sort(unique(d$replicate))
     ylab <- if (input$ph_scale == "log") "log₂ abundance" else "Abundance"
     hlab <- paste(HPI, "hpi")
-    panels <- list()
-    for (i in seq_along(pids)) {
-      ymax <- max(d$value[d$pid == pids[i]], na.rm = TRUE)
-      if (!is.finite(ymax)) ymax <- 1
-      for (smp in SAMPLES) {
-        p <- plot_ly()
-        for (r in seq_along(reps)) {
-          dd <- d[d$pid == pids[i] & d$sample == smp & d$replicate == reps[r], ]
-          dd <- dd[match(HPI, dd$hpi), ]
-          p <- p |> add_trace(x = hlab, y = dd$value, type = "bar", name = paste(smp, sub("rep_", "replicate ", reps[r])),
-                              legendgroup = paste(smp, r), showlegend = (i == 1),
-                              marker = list(color = COL_REP[[smp]][r], line = list(color = SURFACE, width = 1)),
-                              hovertemplate = paste0("<b>", smp, "</b>, %{x}<br>", sub("rep_", "replicate ", reps[r]),
-                                                     "<br>", ylab, ": %{y:.3s}<extra></extra>"))
-        }
-        panels[[length(panels) + 1]] <- p |>
-          layout(barmode = "group", bargap = 0.25,
-                 xaxis = ax(if (i == length(pids)) "Hours post inoculation" else NULL, type = "category",
-                            categoryorder = "array", categoryarray = hlab, showgrid = FALSE),
-                 yaxis = ax(if (smp == SAMPLES[1]) ylab else NULL, range = c(0, ymax * 1.08)))
+    ymax <- suppressWarnings(max(d$value, na.rm = TRUE))
+    if (!is.finite(ymax) || ymax <= 0) ymax <- 1
+    panels <- lapply(SAMPLES, function(smp) {
+      p <- plot_ly()
+      for (r in seq_along(reps)) {
+        dd <- d[d$sample == smp & d$replicate == reps[r], ]
+        dd <- dd[match(HPI, dd$hpi), ]
+        rl <- sub("rep_", "replicate ", reps[r])
+        p <- p |> add_trace(x = hlab, y = dd$value, type = "bar", name = paste(smp, rl),
+                            marker = list(color = COL_REP[[smp]][r], line = list(color = SURFACE, width = 1)),
+                            hovertemplate = paste0("<b>", smp, "</b>, %{x}<br>", rl, "<br>", ylab,
+                                                   ": %{y:.3s}<extra></extra>"))
       }
-    }
-    n <- length(pids)
-    sp <- subplot(panels, nrows = n, shareX = FALSE, shareY = FALSE, titleX = TRUE, titleY = TRUE,
-                  margin = c(0.04, 0.02, 0.07 / max(1, n / 3), 0.07 / max(1, n / 3)))
-    labs <- phos$meta$site_label[match(pids, phos$meta$pid)]
-    ann <- list()
-    for (i in seq_len(n)) {
-      sfx <- if (i == 1) "" else 2 * i - 1
-      ann[[length(ann) + 1]] <- list(text = paste0("<b>", labs[i], "</b>"), xref = paste0("x", sfx, " domain"),
-                                     yref = paste0("y", sfx, " domain"), x = 0, y = 1.03, xanchor = "left",
-                                     yanchor = "bottom", showarrow = FALSE,
-                                     font = list(size = fsz(-1), color = INK, family = "ui-monospace, Menlo, monospace"))
-    }
-    for (j in 1:2) {
-      sfx <- if (j == 1) "" else 2
-      ann[[length(ann) + 1]] <- list(text = paste0("<b>", SAMPLES[j], "</b>"), xref = paste0("x", sfx, " domain"),
-                                     yref = "paper", x = 1, y = 1, xanchor = "right", yanchor = "bottom",
-                                     yshift = 26, showarrow = FALSE, font = list(size = fsz(1), color = COL_SAMPLE[[j]]))
-    }
-    sp |> finish_plot(paste0(ph_protein(), "_phosphosites"), annotations = ann,
-                      legend = list(orientation = "h", x = 0, y = 1, yanchor = "bottom", yshift = 50,
-                                    font = list(size = fsz(-1), color = INK2)),
-                      margin = list(t = 110, r = 20, b = 50, l = 60))
+      p |> layout(yaxis = ax(ylab, range = c(0, ymax * 1.1)))
+    })
+    ann <- lapply(1:2, function(j) list(
+      text = paste0("<b>", SAMPLES[j], "</b>"), xref = "paper", yref = paste0("y", if (j == 1) "" else 2, " domain"),
+      x = 0, y = 1, xanchor = "left", yanchor = "bottom", showarrow = FALSE,
+      font = list(size = fsz(0), color = COL_SAMPLE[[j]])))
+    subplot(panels, nrows = 2, shareX = TRUE, titleY = TRUE, margin = 0.09) |>
+      finish_plot(file, annotations = ann, barmode = "group", bargap = 0.25,
+                  xaxis = ax("Hours post inoculation", type = "category", categoryorder = "array",
+                             categoryarray = hlab, showgrid = FALSE),
+                  legend = list(orientation = "h", x = 0, y = -0.16, yanchor = "top",
+                                font = list(size = fsz(-2), color = INK2)),
+                  margin = list(t = 30, r = 10, b = 90, l = 60))
+  }
+
+  output$ph_profiles_ui <- renderUI({
+    pids <- ph_selected(); m <- ph_meta()
+    for (pid in pids) local({
+      id <- pid; oid <- paste0("ph_prof_", id)
+      output[[oid]] <- renderPlotly({
+        plot_setup(oid, fixed = 15)
+        ph_bar_plot(id, paste0(ph_protein(), "_phosphosite_", id))
+      })
+    })
+    div(class = "exp-grid", lapply(pids, function(id) {
+      r <- m[m$pid == id, ]
+      div(class = "exp-plot", style = "width: 640px;",
+          div(class = "exp-plot-head",
+              tags$h5(if (is.na(r$sites)) "Site not localised" else paste("Site", gsub(";", ", ", r$sites))),
+              span(class = "ref", r$position)),
+          div(class = "peptide-seq", r$peptide),
+          div(class = "exp-plot-note", r$modifications),
+          plotlyOutput(paste0("ph_prof_", id), width = "610px", height = "470px"))
+    }))
   })
 
   ph_heat_matrix <- reactive({
@@ -1963,45 +2131,105 @@ server <- function(input, output, session) {
     out
   })
 
+  # Site map: lollipops of log2FC (delta-pmk1 / Guy11) per localised site, labelled
+  # with the residue, above a protein track with the Pfam domains
   output$ph_map <- renderPlotly({
     plot_setup("ph_map")
     g <- ph_protein()
     len <- genes[g, "length_aa"]
     d <- ph_map_data()
-    if (is.null(d) || !nrow(d)) return(empty_plot("No localised phosphosites with fold-change estimates"))
+    if (is.null(d) || !nrow(d)) return(empty_plot("No localised phosphosites with fold-change estimates for this protein"))
     if (is.na(len)) len <- max(d$pos) + 20
+    fs <- fsz(0)
     d$class <- ifelse(!is.na(d$p_adj) & d$p_adj < 0.05, ifelse(d$log2FC > 0, "up", "down"), "ns")
+    d$lab <- paste0("p", d$residue, d$pos)
     ccol <- c(up = DIV_RAMP[6], down = DIV_RAMP[2], ns = "#a9a8a2")
-    clab <- c(up = "Higher in Δpmk1 (adj. p < 0.05)", down = "Lower in Δpmk1 (adj. p < 0.05)", ns = "Not significant")
-    pf <- parse_pfam(genes[g, "pfam"])
-    shapes <- list(list(type = "rect", x0 = 1, x1 = len, y0 = -0.12, y1 = 0.12, yref = "y",
-                        fillcolor = BACKBONE, line = list(width = 0), layer = "below"))
-    if (!is.null(pf)) for (i in seq_len(nrow(pf)))
-      shapes[[length(shapes) + 1]] <- list(type = "rect", x0 = pf$start[i], x1 = pf$end[i], y0 = -0.22, y1 = 0.22,
-                                           fillcolor = "#bfe6d3", line = list(color = BRAND, width = 1), layer = "below")
-    ylim <- max(1.5, max(abs(d$log2FC), na.rm = TRUE) * 1.15)
-    p <- plot_ly() |>
+    clab <- c(up = "Higher in Δpmk1 (adj. p < 0.05)", down = "Lower in Δpmk1 (adj. p < 0.05)",
+              ns = "Not significant")
+    ylim <- max(1.5, max(abs(d$log2FC), na.rm = TRUE) * 1.3)
+
+    # Top panel: lollipops with residue labels
+    p_top <- plot_ly() |>
       add_segments(x = d$pos, xend = d$pos, y = 0, yend = d$log2FC, showlegend = FALSE, hoverinfo = "skip",
-                   line = list(color = "#b5b4ad", width = 1.2))
+                   line = list(color = "#b5b4ad", width = 1.4))
     for (cl in c("up", "down", "ns")) {
       dd <- d[d$class == cl, ]
       if (!nrow(dd)) next
-      p <- p |> add_trace(x = dd$pos, y = dd$log2FC, type = "scatter", mode = "markers", name = clab[[cl]],
-                          marker = list(color = ccol[[cl]], size = 10, line = list(color = SURFACE, width = 1.5)),
-                          text = sprintf("<b>p%s%d</b><br>%s<br>%s hpi: log₂FC %s<br>adj. p = %s",
-                                         dd$residue, dd$pos, dd$peptide, dd$hpi, round(dd$log2FC, 2), signif(dd$p_adj, 2)),
-                          hovertemplate = "%{text}<extra></extra>")
+      p_top <- p_top |> add_trace(
+        x = dd$pos, y = dd$log2FC, type = "scatter", mode = "markers+text", name = clab[[cl]],
+        text = dd$lab, textposition = ifelse(dd$log2FC >= 0, "top center", "bottom center"),
+        textfont = list(size = fs - 1, color = INK),
+        marker = list(color = ccol[[cl]], size = 12, line = list(color = SURFACE, width = 1.5)),
+        customdata = sprintf("<b>%s</b><br>%s<br>%s hpi: log₂FC %s<br>adj. p = %s",
+                             dd$lab, dd$peptide, dd$hpi, round(dd$log2FC, 2), signif(dd$p_adj, 2)),
+        hovertemplate = "%{customdata}<extra></extra>")
     }
+    p_top <- p_top |> layout(yaxis = ax("log₂FC<br>(Δpmk1 / Guy11)", range = c(-ylim, ylim),
+                                        zeroline = TRUE, zerolinecolor = AXIS, zerolinewidth = 1.5))
+
+    # Bottom panel: protein track with domains and site ticks
+    pf <- parse_pfam(genes[g, "pfam"])
+    p_bot <- plot_ly() |>
+      add_trace(x = c(1, len), y = c(0, 0), type = "scatter", mode = "lines", showlegend = FALSE,
+                hoverinfo = "skip", line = list(color = BACKBONE, width = 10))
+    shapes <- list()
+    ann <- list()
     if (!is.null(pf)) {
-      p <- p |> add_trace(x = (pf$start + pf$end) / 2, y = rep(0, nrow(pf)), type = "scatter", mode = "markers",
-                          marker = list(size = 14, opacity = 0), showlegend = FALSE, hoverinfo = "text",
-                          text = sprintf("<b>%s</b> (%s)<br>%d-%d aa", pf$name, pf$pfam, pf$start, pf$end))
+      dom_names <- unique(pf$name)
+      dcol <- setNames(SERIES[(seq_along(dom_names) - 1) %% length(SERIES) + 1], dom_names)
+      plot_px <- max(300, (session$clientData$output_ph_map_width %||% 900) - 140)
+      px_per_aa <- plot_px / len
+      for (i in seq_len(nrow(pf))) {
+        shapes[[length(shapes) + 1]] <- list(type = "rect", xref = "x", yref = "y",
+                                             x0 = pf$start[i], x1 = pf$end[i], y0 = -0.45, y1 = 0.45,
+                                             fillcolor = dcol[[pf$name[i]]], line = list(color = SURFACE, width = 1))
+        fit <- floor((pf$end[i] - pf$start[i]) * px_per_aa / (fs * 0.6)) - 1
+        nm <- pf$name[i]
+        inside <- fit >= 6
+        lab <- if (!inside) nm else if (nchar(nm) > fit) paste0(substr(nm, 1, fit - 1), "…") else nm
+        ann[[length(ann) + 1]] <- list(text = paste0("<b>", lab, "</b>"), xref = "x", yref = "y2",
+                                       x = (pf$start[i] + pf$end[i]) / 2, y = if (inside) 0 else -0.6,
+                                       yanchor = if (inside) "middle" else "top", showarrow = FALSE,
+                                       font = list(size = fs - 2, color = if (inside) "#ffffff" else INK2))
+      }
+      p_bot <- p_bot |> add_trace(x = (pf$start + pf$end) / 2, y = rep(0, nrow(pf)), type = "scatter",
+                                  mode = "markers", marker = list(size = 20, opacity = 0), showlegend = FALSE,
+                                  customdata = sprintf("<b>%s</b> (%s)<br>%d-%d aa", pf$name, pf$pfam, pf$start, pf$end),
+                                  hovertemplate = "%{customdata}<extra></extra>")
+    } else {
+      ann[[1]] <- list(text = "No Pfam domains annotated", xref = "x", yref = "y2", x = len / 2, y = -0.6,
+                       yanchor = "top", showarrow = FALSE, font = list(size = fs - 2, color = MUTED))
     }
-    p |> finish_plot(paste0(g, "_phosphosite_map"), shapes = shapes,
-                     xaxis = ax(paste0("Residue (", g, ", ", len, " aa)"), range = c(0, len * 1.02), showgrid = FALSE),
-                     yaxis = ax("log₂FC (Δpmk1 / Guy11)", range = c(-ylim, ylim), zeroline = TRUE,
-                                zerolinecolor = AXIS),
-                     margin = list(t = 50, r = 20, b = 50, l = 60))
+    u <- d[!duplicated(d$pos), ]
+    p_bot <- p_bot |>
+      add_trace(x = u$pos, y = rep(0.62, nrow(u)), type = "scatter", mode = "markers", showlegend = FALSE,
+                marker = list(symbol = "triangle-down", size = 9, color = PHOS_MARK),
+                customdata = u$lab, hovertemplate = "%{customdata}<extra></extra>") |>
+      layout(yaxis = list(visible = FALSE, range = c(-1.2, 0.9), fixedrange = TRUE), shapes = shapes)
+
+    # Shapes belong to the bottom panel (subplot maps them onto its axes)
+    subplot(p_top, p_bot, nrows = 2, heights = c(0.74, 0.26), shareX = TRUE, titleY = TRUE, margin = 0.02) |>
+      finish_plot(paste0(g, "_phosphosite_map"), annotations = ann,
+                  xaxis = ax(paste0("Residue (", g, ", ", len, " aa)"), range = c(-len * 0.02, len * 1.02),
+                             showgrid = FALSE),
+                  legend = list(orientation = "h", x = 0, y = 1.02, yanchor = "bottom",
+                                font = list(size = fsz(-1), color = INK2)),
+                  margin = list(t = 40, r = 20, b = 50, l = 70))
+  })
+
+  # Domain annotation listed under the site map
+  output$ph_map_domains <- renderUI({
+    g <- ph_protein()
+    pf <- parse_pfam(genes[g, "pfam"])
+    ipr <- genes[g, "interpro"]
+    div(class = "method-box",
+        tags$strong("Domains. "),
+        if (is.null(pf)) "No Pfam domains with positions are annotated for this protein."
+        else tagList(lapply(seq_len(nrow(pf)), function(i) tagList(
+          if (i > 1) "; ",
+          tags$a(href = url_pfam(pf$pfam[i]), target = "_blank", rel = "noopener", pf$name[i]),
+          sprintf(" (%s, %d-%d aa)", pf$pfam[i], pf$start[i], pf$end[i])))),
+        if (!is.na(ipr) && nzchar(ipr)) div(class = "mt-1", tags$strong("InterPro: "), ipr))
   })
 
   output$ph_table <- renderReactable({
@@ -2049,11 +2277,12 @@ server <- function(input, output, session) {
       fill_vals <- c(setNames(COL_REP[[1]], paste("Guy11", reps)), setNames(COL_REP[[2]], paste("delta-pmk1", reps)))
       ggplot(d, aes(factor(hpi, HPI), value, fill = group)) +
         geom_col(position = position_dodge(width = 0.85), width = 0.8, colour = "white", linewidth = 0.2, na.rm = TRUE) +
-        facet_grid(site ~ sample, scales = "free_y") +
+        facet_grid(sample ~ site) +
         scale_fill_manual(values = fill_vals, name = NULL, labels = function(x) sub("rep_", "replicate ", x)) +
         labs(x = "Hours post inoculation", y = if (input$ph_scale == "log") "log2 abundance" else "Abundance",
              title = paste(ph_protein(), first_name[[ph_protein()]] %||% "")) +
-        theme_mg() + theme(strip.text.y = element_text(family = "mono", size = 6, angle = 0),
+        theme_mg() + theme(strip.text.x = element_text(family = "mono", size = 6),
+                           axis.text.x = element_text(angle = 45, hjust = 1),
                            panel.border = element_rect(colour = "black", linewidth = 0.5, fill = NA))
     } else if (view == "heatmap") {
       h <- ph_heat_matrix(); M <- h$M
@@ -2094,12 +2323,20 @@ server <- function(input, output, session) {
       if (is.na(len)) len <- max(d$pos) + 20
       d$class <- ifelse(!is.na(d$p_adj) & d$p_adj < 0.05, ifelse(d$log2FC > 0, "Higher in delta-pmk1", "Lower in delta-pmk1"), "Not significant")
       pf <- parse_pfam(genes[g, "pfam"])
+      d$lab <- paste0("p", d$residue, d$pos)
+      ylim <- max(1.5, max(abs(d$log2FC), na.rm = TRUE) * 1.3)
+      trk <- -ylim - 0.6   # protein track below the lollipops
       ggplot(d) +
-        annotate("rect", xmin = 1, xmax = len, ymin = -0.1, ymax = 0.1, fill = "#e4e4e0") +
-        (if (!is.null(pf)) annotate("rect", xmin = pf$start, xmax = pf$end, ymin = -0.2, ymax = 0.2,
-                                    fill = "#bfe6d3", colour = BRAND)) +
+        geom_hline(yintercept = 0, colour = "#c9c8c2", linewidth = 0.4) +
+        annotate("rect", xmin = 1, xmax = len, ymin = trk - 0.12, ymax = trk + 0.12, fill = "#d9d8d3") +
+        (if (!is.null(pf)) annotate("rect", xmin = pf$start, xmax = pf$end, ymin = trk - 0.35, ymax = trk + 0.35,
+                                    fill = SERIES[(match(pf$name, unique(pf$name)) - 1) %% length(SERIES) + 1])) +
+        (if (!is.null(pf)) annotate("text", x = (pf$start + pf$end) / 2, y = trk - 0.5, label = pdf_safe(pf$name),
+                                    vjust = 1, size = 2.6, colour = INK2)) +
         geom_segment(aes(x = pos, xend = pos, y = 0, yend = log2FC), colour = "#b5b4ad") +
         geom_point(aes(pos, log2FC, colour = class), size = 2.5) +
+        geom_text(aes(pos, log2FC, label = lab, vjust = ifelse(log2FC >= 0, -1, 2)), size = 2.6, colour = INK) +
+        coord_cartesian(ylim = c(trk - 1, ylim), clip = "off") +
         scale_colour_manual(values = c("Higher in delta-pmk1" = DIV_RAMP[6], "Lower in delta-pmk1" = DIV_RAMP[2],
                                        "Not significant" = "#a9a8a2"), name = NULL) +
         labs(x = paste0("Residue (", g, ", ", len, " aa)"), y = "log2FC (delta-pmk1 / Guy11)",
@@ -2228,7 +2465,7 @@ server <- function(input, output, session) {
             margin = 0.004) |>
       finish_plot("ortholog_profile",
                   yaxis = list(visible = FALSE, range = c(0.4, nrow(sp) + 0.6), fixedrange = FALSE),
-                  legend = list(orientation = "h", x = 0, y = -0.02, yanchor = "top", font = list(size = fsz(-2))),
+                  legend = list(font = list(size = fsz(-2), color = INK2)),
                   margin = list(t = 110, r = 10, b = 70, l = 10))
   })
 
@@ -2359,6 +2596,7 @@ server <- function(input, output, session) {
                         lifestyle = rep(sp$lifestyle, n))
     strips <- rbind(data.frame(x = n + 1.2, y = sp$tree_y, fill = sp$lifestyle, kind = "Lifestyle"),
                     data.frame(x = n + 2.2, y = sp$tree_y, fill = paste("Appressorium:", sp$appressorium), kind = "Appressorium"))
+    strips <- strips[strips$fill != "Appressorium: None", ]   # no appressorium: left blank
     zmax <- max(3, stats::quantile(M[M > 0], 0.95, na.rm = TRUE))
     cells$fill <- vapply(seq_len(nrow(cells)), function(i) {
       if (cells$count[i] == 0) return("#f2f2ef")

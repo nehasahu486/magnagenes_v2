@@ -94,4 +94,7 @@ shinylive::export(
 )
 
 file.copy("site-assets/loading_cycle.png", file.path(out_dir, "loading_cycle.png"), overwrite = TRUE)
+# Tutorial video and chapters (opened from the Tutorial button in the navbar)
+for (f in c("tutorial.mp4", "tutorial_chapters.json"))
+  if (file.exists(file.path("site-assets", f))) file.copy(file.path("site-assets", f), file.path(out_dir, f), overwrite = TRUE)
 message("Site written to ", out_dir, "/")

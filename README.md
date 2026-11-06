@@ -9,12 +9,12 @@ MagnaGenes v2.0 is an extension of MagnaGenes v1.0 by Andrew Foster: <https://ze
 | Tab | What it does |
 |---|---|
 | Gene Search | Search by MGG ID, gene name (e.g. `PMK1`) or keyword in any annotation field. Gene profiles show genome location, InterPro/Pfam domains, mutant phenotypes, literature, an expression chart and a protein architecture diagram, with links to UniProt, AlphaFold DB, Ensembl Fungi, InterPro, Pfam and PubMed. Exports annotation TSV and protein/CDS FASTA. |
-| Transcriptomics | Expression profiles (small multiples per experiment), clustered heatmaps (log2 TPM, TPM or row z-score), gene-gene Pearson correlation, and a data table across 31 conditions in 5 experiments. |
-| Phosphoproteomics | Guy11 vs Δpmk1 phosphosite profiles (replicates, mean ± SD), abundance heatmaps, log2 fold-change heatmaps with Welch t-tests (BH-corrected), and a protein site map with Pfam domains. |
+| Transcriptomics | TPM line plots per experiment (error bars when replicate values are available, optional box plot of all genes), clustered row z-score heatmaps with optional TPM labels, gene-gene Pearson correlation on a range fitted to the selected genes, and a data table across 31 conditions in 5 experiments. |
+| Phosphoproteomics | One plot per phosphopeptide with Guy11 above Δpmk1 (bars are biological replicates), abundance heatmaps, log2 fold-change heatmaps with Welch t-tests (BH-corrected), and a protein site map with labelled sites and Pfam domains. |
 | Phylogenomics | Ortholog counts across 42 fungi aligned to the species tree (phylogram or cladogram), annotated by lifestyle and appressorium type; conservation by lifestyle; M. oryzae orthogroup members with FASTA export. |
 | GO Enrichment | Fisher's exact test (hypergeometric) on propagated GO annotations, BH or Bonferroni correction, optional custom background, dot or lollipop plot, bar chart, treemap, significance-vs-enrichment plot, gene-term matrix and results table with QuickGO links, in a colour of your choice. Replaces topGO, which does not run in WebAssembly. |
 
-The site has a light/dark theme switch and a Reset button. Every chart can be saved as a vector SVG from its toolbar (camera icon), and every tab has PDF, TSV and (where relevant) FASTA downloads.
+The site has a light/dark theme switch, a Reset button and a Tutorial button with a video tour and clickable chapters. Every chart can be saved as a vector SVG from its toolbar (camera icon), and every tab has PDF, TSV and (where relevant) FASTA downloads.
 
 ## Repository layout
 
@@ -27,9 +27,10 @@ data-raw/                   how the data are built (see data-raw/README.md)
   prepare_data.R            builds app/data/ from the raw files
   metadata/                 rnaseq_experiments.csv: experiment labels, order, paper links
   source/                   raw TSV files by data type (not in git; too large)
-site-assets/                image used by the loading screen
+site-assets/                loading-screen image, tutorial video and its chapter list
 build_site.R                Shinylive export plus the loading screen
 tests/smoke_test.R          renders every output and download
+tools/record_tutorial.py    re-records the tutorial video (optional; needs Playwright)
 .github/workflows/          publishes the site to GitHub Pages on every push
 ```
 
@@ -49,6 +50,19 @@ httpuv::runStaticServer("site")   # then open the printed URL
 ```
 
 The first load takes about a minute while webR and the R packages download. Later visits load from the browser cache.
+
+## Tutorial video
+
+The Tutorial button plays `site-assets/tutorial.mp4` with chapters from
+`site-assets/tutorial_chapters.json`; `build_site.R` copies both next to the app, so the
+video is only downloaded when someone opens it. After changing the app, re-record it with:
+
+```sh
+pip install playwright imageio-ffmpeg && playwright install ffmpeg
+Rscript build_site.R
+python -m http.server 8765 --bind 127.0.0.1 --directory site &
+python tools/record_tutorial.py
+```
 
 ## Deploy to GitHub Pages
 
@@ -70,7 +84,7 @@ The script needs `data.table`, `ape`, `GO.db` and `AnnotationDbi` (local use onl
 What it does:
 
 - Annotation: long format converted to one row per gene; UniProt accessions and chromosome coordinates added from Ensembl.
-- Expression: a gene x condition matrix of mean TPM (duplicate rows averaged).
+- Expression: a gene x condition matrix of mean TPM (duplicate rows averaged), plus standard deviations when a `Replicate` column is present.
 - Phosphoproteomics: normalised replicate abundances only (the "Averaged" rows equal the replicate mean and are recomputed in the app); absolute phosphosite positions derived from peptide coordinates.
 - Orthology: only orthogroups that contain M. oryzae genes are kept (10,015 of 78,665); species tree coordinates precomputed.
 - GO: annotations propagated to all ancestor terms using GO.db.

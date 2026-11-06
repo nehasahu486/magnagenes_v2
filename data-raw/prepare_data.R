@@ -141,8 +141,16 @@ save_rds(genes, "genes")
 # -----------------------------------------------------------------------------
 message("Expression")
 ex_files <- list.files(file.path(raw_dir, "transcriptomics"), pattern = "\\.tsv$", full.names = TRUE)
-ex <- rbindlist(lapply(ex_files, fread, encoding = "UTF-8"), use.names = TRUE)
-ex <- ex[, .(TPM = mean(TPM, na.rm = TRUE)), by = .(Gene, sample, Experiment)]
+ex <- rbindlist(lapply(ex_files, fread, encoding = "UTF-8"), use.names = TRUE, fill = TRUE)
+# Optional "Replicate" column: one row per biological replicate. When present,
+# the app shows mean +/- SD error bars; otherwise values are already means.
+if (!"Replicate" %in% names(ex)) ex[, Replicate := NA_character_]
+ex_rep <- ex[!is.na(Replicate), .(TPM = mean(TPM, na.rm = TRUE)), by = .(Gene, sample, Experiment, Replicate)]
+ex_sd  <- ex_rep[, .(SD = if (.N > 1) stats::sd(TPM) else NA_real_, N = .N, TPM = mean(TPM)),
+                 by = .(Gene, sample, Experiment)]
+ex <- rbind(ex_sd[, .(Gene, sample, Experiment, TPM)],
+            ex[is.na(Replicate), .(TPM = mean(TPM, na.rm = TRUE)), by = .(Gene, sample, Experiment)])
+ex <- ex[!duplicated(ex[, .(Gene, sample, Experiment)])]
 
 reg <- fread(file.path(meta_dir, "rnaseq_experiments.csv"), encoding = "UTF-8")
 extra <- setdiff(unique(ex$Experiment), reg$experiment)
@@ -166,12 +174,21 @@ m <- dcast(ex, Gene ~ id, value.var = "TPM")
 mat <- as.matrix(m[, cond$id, with = FALSE])
 rownames(mat) <- m$Gene
 mat <- signif(mat, 4)
+reg[, has_replicates := experiment %in% ex_sd[N > 1, unique(Experiment)]]
 expression <- list(
   tpm = mat,
   conditions = as.data.frame(cond),
   experiments = as.data.frame(reg),
   sample_levels = unique(cond$sample)
 )
+if (nrow(ex_sd)) {
+  ex_sd[, id := paste(Experiment, sample, sep = " | ")]
+  s <- dcast(ex_sd, Gene ~ id, value.var = "SD")
+  sdm <- matrix(NA_real_, nrow(mat), ncol(mat), dimnames = dimnames(mat))
+  hit <- intersect(names(s), colnames(mat))
+  sdm[match(s$Gene, rownames(mat)), hit] <- as.matrix(s[, hit, with = FALSE])
+  expression$sd <- signif(sdm, 4)
+}
 save_rds(expression, "expression")
 
 # -----------------------------------------------------------------------------

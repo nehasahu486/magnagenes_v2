@@ -17,7 +17,7 @@ testServer(server, {
     s_query = paste(app_env$EX_SIGNALLING, collapse = "\n"), s_field = "all",
     s_effector = FALSE, s_pheno = FALSE, s_isoforms = FALSE, s_go = 0, s_profile_gene = "MGG_09565",
     tx_genes = paste(app_env$EX_SIGNALLING, collapse = "\n"), tx_exps = names(app_env$EXP_SHORT),
-    tx_scale = "log", tx_cluster = TRUE, tx_go = 0, dark_mode = "light", tx_view = "profiles", tx_pdf_w = 11, tx_pdf_h = 7,
+    tx_box = TRUE, tx_heat_values = TRUE, tx_cluster = TRUE, tx_go = 0, dark_mode = "light", tx_view = "profiles", tx_pdf_w = 11, tx_pdf_h = 7,
     ph_protein = "MGG_00800", ph_scale = "raw", ph_zero_na = TRUE, ph_rowz = FALSE, ph_map_time = "max",
     ph_view = "profiles", ph_pdf_w = 11, ph_pdf_h = 7,
     og_genes = paste(app_env$EX_PHYLO, collapse = "\n"), og_tree_mode = "phylo", og_show_counts = TRUE,
@@ -30,7 +30,9 @@ testServer(server, {
   outs <- c("s_summary", "s_table", "s_profile", "s_profile_expr", "s_profile_arch",
             "tx_summary", "tx_profiles_ui", "tx_heat_ui", paste0("tx_prof_", 1:5), paste0("tx_heat_", 1:5),
             "tx_corr", "tx_table",
-            "ph_header", "ph_peptides_ui", "ph_profiles", "ph_heat", "ph_fc", "ph_map", "ph_table",
+            "ph_header", "ph_peptides_ui", "ph_profiles_ui",
+            paste0("ph_prof_", head(app_env$phos$meta$pid[app_env$phos$meta$protein == "MGG_00800"], 2)),
+            "ph_heat", "ph_fc", "ph_map", "ph_map_domains", "ph_table",
             "og_summary", "og_plot", "og_life", "og_members", "og_table",
             "go_summary", "go_dot", "go_bar", "go_tree", "go_volcano", "go_matrix", "go_table")
   for (o in outs) check(o, output[[o]])
@@ -55,8 +57,11 @@ testServer(server, {
   # Keyword search and alternative settings
   session$setInputs(s_query = "melanin biosynthesis\nseptin, MGG_09565 PMK1", s_go = 1)
   check("keyword search", stopifnot(nrow(s_result()$df) > 0))
-  session$setInputs(tx_scale = "z", tx_go = 1)
-  check("tx z-score heatmap", output$tx_heat_2)
+  session$setInputs(tx_box = FALSE, tx_heat_values = FALSE, tx_go = 1)
+  check("tx heatmap no labels", output$tx_heat_2)
+  check("tx profile no box", output$tx_prof_5)
+  session$setInputs(ph_protein = "MGG_09565")
+  check("ph map other protein", output$ph_map)
   session$setInputs(dark_mode = "dark", go_viridis = TRUE)
   check("dark mode plot", output$go_tree)
   check("dark mode profile", output$s_profile_expr)

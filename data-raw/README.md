@@ -37,6 +37,15 @@ data-raw/
    `Experiment` is the name that links the rows to the registry. Every `.tsv` file in the
    folder is read and combined, so existing files do not need to change.
 
+   To show error bars, add an optional `Replicate` column and give one row per
+   biological replicate (for example `rep1`, `rep2`, `rep3`). The app then plots the mean
+   with the standard deviation. Without it, each value is taken as the averaged TPM of the
+   replicates and the plots say so.
+
+   | Gene | sample | TPM | Experiment | Replicate |
+   |---|---|---|---|---|
+   | MGG_00005 | 0hpi | 11.9 | Guy11 - septin mutant | rep1 |
+
 2. Add one row to `metadata/rnaseq_experiments.csv`:
 
    | column | meaning |
