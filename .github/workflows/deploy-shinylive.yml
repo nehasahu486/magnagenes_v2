@@ -37,7 +37,7 @@ jobs:
             any::colorspace
 
       - name: Export app with Shinylive
-        run: Rscript -e 'shinylive::export("app", "site")'
+        run: Rscript build_site.R
 
       - uses: actions/upload-pages-artifact@v3
         with:

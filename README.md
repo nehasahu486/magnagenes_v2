@@ -27,6 +27,8 @@ data-raw/
   prepare_data.R      Builds app/data/ from the raw MagnaGenes TSV files
 tests/
   smoke_test.R        Renders every output and download with default inputs
+build_site.R          Shinylive export plus the loading screen (life cycle, progress bar)
+site-assets/          Files used only by the loading screen
 .github/workflows/
   deploy-shinylive.yml  Exports the app with Shinylive and publishes it to GitHub Pages
 ```
@@ -42,7 +44,7 @@ shiny::runApp("app")
 
 ```r
 install.packages("shinylive")
-shinylive::export("app", "site")
+source("build_site.R")             # exports to site/ with the custom loading screen
 httpuv::runStaticServer("site")   # then open the printed URL
 ```
 
@@ -52,7 +54,7 @@ The first load takes about a minute while webR and the R packages download. Late
 
 1. Push this repository to GitHub.
 2. In the repository settings, open **Pages** and set **Source** to **GitHub Actions**.
-3. Every push to `main` runs `.github/workflows/deploy-shinylive.yml`, which exports the app and publishes it at `https://<user>.github.io/<repository>/`.
+3. Every push to `main` runs `.github/workflows/deploy-shinylive.yml`, which builds the site with `build_site.R` and publishes it at `https://<user>.github.io/<repository>/`.
 
 ## Rebuilding the data
 

@@ -14,7 +14,7 @@ check <- function(label, expr) {
 
 testServer(server, {
   session$setInputs(
-    s_mode = "id", s_ids = paste(app_env$EX_SIGNALLING, collapse = "\n"), s_field = "all", s_kw = "",
+    s_query = paste(app_env$EX_SIGNALLING, collapse = "\n"), s_field = "all",
     s_effector = FALSE, s_pheno = FALSE, s_isoforms = FALSE, s_go = 0, s_profile_gene = "MGG_09565",
     tx_genes = paste(app_env$EX_SIGNALLING, collapse = "\n"), tx_exps = names(app_env$EXP_SHORT),
     tx_scale = "log", tx_cluster = TRUE, tx_go = 0, tx_view = "profiles", tx_pdf_w = 11, tx_pdf_h = 7,
@@ -52,7 +52,7 @@ testServer(server, {
   }
 
   # Keyword search and alternative settings
-  session$setInputs(s_mode = "kw", s_kw = "melanin, septin", s_go = 1)
+  session$setInputs(s_query = "melanin biosynthesis\nseptin, MGG_09565 PMK1", s_go = 1)
   check("keyword search", stopifnot(nrow(s_result()$df) > 0))
   session$setInputs(tx_scale = "z", tx_go = 1)
   check("tx z-score heatmap", output$tx_heat)
