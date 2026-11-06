@@ -5,10 +5,18 @@
 # that load quickly in the browser (shinylive / webR).
 #
 # Run from the repository root:
-#   Rscript data-raw/prepare_data.R <path-to-raw-tsv-folder>
+#   Rscript data-raw/prepare_data.R
+#
+# Inputs (see data-raw/README.md for formats and how to add new data):
+#   data-raw/source/annotation/fin_data.tsv
+#   data-raw/source/transcriptomics/*.tsv        (all files are combined)
+#   data-raw/source/phosphoproteomics/fin_phosmag.tsv
+#   data-raw/source/orthology/fin_ortho.tsv, Ladderrized_spstree.tre
+#   data-raw/source/gene_ontology/go_universe.tsv
+#   data-raw/metadata/rnaseq_experiments.csv     (labels, order, references)
 #
 # Needs (locally only, never in the app): data.table, ape, GO.db, AnnotationDbi
-# Downloads (once, cached in data-raw/downloads/):
+# Downloads (once, cached in data-raw/source/downloads/):
 #   - Ensembl Fungi release 60, Magnaporthe oryzae MG8 protein and CDS FASTA
 # =============================================================================
 
@@ -20,9 +28,10 @@ suppressPackageStartupMessages({
 })
 
 args    <- commandArgs(trailingOnly = TRUE)
-raw_dir <- if (length(args)) args[1] else "../data"
-out_dir <- "app/data"
-dl_dir  <- "data-raw/downloads"
+raw_dir  <- if (length(args)) args[1] else "data-raw/source"
+meta_dir <- "data-raw/metadata"
+out_dir  <- "app/data"
+dl_dir   <- file.path(raw_dir, "downloads")
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 dir.create(dl_dir,  showWarnings = FALSE, recursive = TRUE)
 
@@ -92,7 +101,7 @@ canon <- tx[order(gene, !grepl("T0$", transcript))][, .SD[1], by = gene]
 # 2. Gene annotation table (one row per gene)
 # -----------------------------------------------------------------------------
 message("Annotations")
-ann <- fread(file.path(raw_dir, "fin_data.tsv"), sep = "\t", quote = "", encoding = "UTF-8")
+ann <- fread(file.path(raw_dir, "annotation", "fin_data.tsv"), sep = "\t", quote = "", encoding = "UTF-8")
 ann[, value := trimws(value)]
 ann <- ann[value != "" & !is.na(value)]
 ann <- ann[, .(value = paste(unique(value), collapse = " | ")), by = .(Gene, variable)]
@@ -126,19 +135,32 @@ save_rds(genes, "genes")
 
 # -----------------------------------------------------------------------------
 # 3. Expression (gene x condition matrix of mean TPM)
+#    Every TSV in source/transcriptomics/ is read (columns: Gene, sample, TPM,
+#    Experiment). Order, labels and paper links come from
+#    metadata/rnaseq_experiments.csv; experiments missing there are appended.
 # -----------------------------------------------------------------------------
 message("Expression")
-ex <- fread(file.path(raw_dir, "fin_exp.tsv"), encoding = "UTF-8")
+ex_files <- list.files(file.path(raw_dir, "transcriptomics"), pattern = "\\.tsv$", full.names = TRUE)
+ex <- rbindlist(lapply(ex_files, fread, encoding = "UTF-8"), use.names = TRUE)
 ex <- ex[, .(TPM = mean(TPM, na.rm = TRUE)), by = .(Gene, sample, Experiment)]
-sample_levels <- c("Conidia", "0hpi", "2hpi", "4hpi", "6hpi", "8hpi", "14hpi", "16hpi",
-                   "24hpi", "48hpi", "72hpi", "96hpi", "144hpi", "Pmk1 Active", "Pmk1 Inhibited")
-exp_levels <- c("Guy11 - in planta", "Guy11 - hydrophobic surface",
-                "Guy11 - hydrophilic surface", "Δpmk1 - hydrophobic surface",
-                "Pmk1 AS Mutant")
-cond <- unique(ex[, .(Experiment, sample)])
-cond[, `:=`(Experiment = factor(Experiment, exp_levels), sample = factor(sample, sample_levels))]
-setorder(cond, Experiment, sample)
-cond[, id := paste(Experiment, sample, sep = " | ")]
+
+reg <- fread(file.path(meta_dir, "rnaseq_experiments.csv"), encoding = "UTF-8")
+extra <- setdiff(unique(ex$Experiment), reg$experiment)
+if (length(extra)) {
+  warning("Experiments not in rnaseq_experiments.csv (added with default labels): ",
+          paste(extra, collapse = ", "))
+  reg <- rbind(reg, data.table(experiment = extra, label = extra, samples = "", reference = "",
+                               url = "", description = ""))
+}
+reg <- reg[experiment %in% ex$Experiment]
+
+cond <- rbindlist(lapply(seq_len(nrow(reg)), function(i) {
+  smp <- unique(ex[Experiment == reg$experiment[i], sample])
+  ord <- strsplit(reg$samples[i], ";")[[1]]
+  smp <- c(intersect(ord, smp), sort(setdiff(smp, ord)))
+  data.table(experiment = reg$experiment[i], sample = smp)
+}))
+cond[, id := paste(experiment, sample, sep = " | ")]
 ex[, id := paste(Experiment, sample, sep = " | ")]
 m <- dcast(ex, Gene ~ id, value.var = "TPM")
 mat <- as.matrix(m[, cond$id, with = FALSE])
@@ -146,12 +168,9 @@ rownames(mat) <- m$Gene
 mat <- signif(mat, 4)
 expression <- list(
   tpm = mat,
-  conditions = data.frame(id = cond$id,
-                          experiment = as.character(cond$Experiment),
-                          sample = as.character(cond$sample),
-                          stringsAsFactors = FALSE),
-  sample_levels = sample_levels,
-  experiment_levels = exp_levels
+  conditions = as.data.frame(cond),
+  experiments = as.data.frame(reg),
+  sample_levels = unique(cond$sample)
 )
 save_rds(expression, "expression")
 
@@ -160,7 +179,7 @@ save_rds(expression, "expression")
 #    "Averaged" rows equal the replicate mean, so they are recomputed in the app.
 # -----------------------------------------------------------------------------
 message("Phosphoproteomics")
-ph <- fread(file.path(raw_dir, "fin_phosmag.tsv"), encoding = "UTF-8")[type == "Normalized"]
+ph <- fread(file.path(raw_dir, "phosphoproteomics", "fin_phosmag.tsv"), encoding = "UTF-8")[type == "Normalized"]
 ph[, pid := .GRP, by = .(Master_Protein_Accessions, Positions_in_Master_Proteins, label, Modifications)]
 pep_meta <- unique(ph[, .(pid, protein = Master_Protein_Accessions,
                           position = Positions_in_Master_Proteins,
@@ -209,7 +228,7 @@ save_rds(phospho, "phospho")
 # 5. Orthology (orthogroups that contain M. oryzae genes only)
 # -----------------------------------------------------------------------------
 message("Orthology")
-og <- fread(file.path(raw_dir, "fin_ortho.tsv"), encoding = "UTF-8")
+og <- fread(file.path(raw_dir, "orthology", "fin_ortho.tsv"), encoding = "UTF-8")
 members <- unique(og[!is.na(ProtID) & ProtID != "", .(gene = ProtID, og = OG_ID)])
 og <- og[OG_ID %in% members$og]
 species <- unique(og[, .(code = Species, name = Name, appressorium = Appresor, lifestyle = Lifestyle)])
@@ -220,7 +239,7 @@ rownames(cmat) <- cm$OG_ID
 storage.mode(cmat) <- "integer"
 
 # Species tree: precomputed rectangular-layout coordinates (no ape needed in app)
-tree <- read.tree(file.path(raw_dir, "Ladderrized_spstree.tre"))
+tree <- read.tree(file.path(raw_dir, "orthology", "Ladderrized_spstree.tre"))
 n_tip <- length(tree$tip.label)
 edge  <- tree$edge
 x_phylo <- node.depth.edgelength(tree)
@@ -256,7 +275,7 @@ save_rds(orthology, "orthology")
 # 6. Gene Ontology (annotations propagated to all ancestor terms)
 # -----------------------------------------------------------------------------
 message("Gene Ontology")
-gu <- fread(file.path(raw_dir, "go_universe.tsv"), sep = "\t", header = TRUE)
+gu <- fread(file.path(raw_dir, "gene_ontology", "go_universe.tsv"), sep = "\t", header = TRUE)
 direct <- gu[, .(go = trimws(unlist(strsplit(GO_ID, ",")))), by = .(gene = ProtID)]
 direct <- unique(direct[grepl("^GO:", go)])
 

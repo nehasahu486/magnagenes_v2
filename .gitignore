@@ -1,5 +1,5 @@
 site/
-data-raw/downloads/
+data-raw/source/
 .Rhistory
 .RData
 .Rproj.user/

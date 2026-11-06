@@ -1,0 +1,6 @@
+experiment,label,samples,reference,url,description
+Guy11 - in planta,Guy11 in planta,Conidia;8hpi;16hpi;24hpi;48hpi;72hpi;96hpi;144hpi,"Yan et al. (2023) The Plant Cell",https://doi.org/10.1093/plcell/koad036,"Guy11 infecting rice leaves, conidia to 144 hours post inoculation"
+Guy11 - hydrophobic surface,Guy11 hydrophobic,0hpi;2hpi;4hpi;8hpi;14hpi;16hpi;24hpi,"Osés-Ruiz et al. (2021) Nature Microbiology",https://doi.org/10.1038/s41564-021-00978-w,"Guy11 germinating on an inductive hydrophobic surface"
+Guy11 - hydrophilic surface,Guy11 hydrophilic,2hpi;4hpi;6hpi;8hpi;14hpi;24hpi,"Osés-Ruiz et al. (2021) Nature Microbiology",https://doi.org/10.1038/s41564-021-00978-w,"Guy11 on a non-inductive hydrophilic surface"
+Δpmk1 - hydrophobic surface,Δpmk1 hydrophobic,0hpi;2hpi;4hpi;6hpi;8hpi;14hpi;16hpi;24hpi,"Osés-Ruiz et al. (2021) Nature Microbiology",https://doi.org/10.1038/s41564-021-00978-w,"Δpmk1 mutant on an inductive hydrophobic surface"
+Pmk1 AS Mutant,Pmk1 AS mutant,Pmk1 Active;Pmk1 Inhibited,"Sakulkoo et al. (2018) Science",https://doi.org/10.1126/science.aaq0892,"Analogue-sensitive Pmk1 mutant in planta, with or without the inhibitor"
