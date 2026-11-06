@@ -1,0 +1,2229 @@
+# =============================================================================
+# MagnaGenes v2.0
+# Multi-omics explorer for Magnaporthe oryzae (rice blast fungus)
+#
+# An extension of MagnaGenes v1.0 by Andrew Foster
+# (https://zenodo.org/records/4647766). Runs entirely in the browser with Shinylive (webR): no server, no AI services,
+# no API keys. All data are bundled in data/ (built by data-raw/prepare_data.R).
+# =============================================================================
+
+library(shiny)
+library(bslib)
+library(plotly)
+library(ggplot2)
+library(reactable)
+
+# Not called directly. These lines make the Shinylive exporter bundle packages
+# that the WebAssembly builds of ggplot2/scales still require.
+if (FALSE) {
+  library(munsell)
+  library(colorspace)
+}
+
+APP_VERSION <- "2.0"
+V1_URL      <- "https://zenodo.org/records/4647766"   # MagnaGenes v1.0
+DATA_DIR    <- "data"
+
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
+
+# =============================================================================
+# DATA
+# =============================================================================
+
+genes  <- readRDS(file.path(DATA_DIR, "genes.rds"))
+expr   <- readRDS(file.path(DATA_DIR, "expression.rds"))
+phos   <- readRDS(file.path(DATA_DIR, "phospho.rds"))
+ortho  <- readRDS(file.path(DATA_DIR, "orthology.rds"))
+go_db  <- readRDS(file.path(DATA_DIR, "go.rds"))
+
+rownames(genes) <- genes$gene
+
+# Sequences are large, so they are read only when first needed
+.seq_cache <- new.env()
+get_seqs <- function(type = c("protein", "cds")) {
+  type <- match.arg(type)
+  if (is.null(.seq_cache[[type]])) {
+    .seq_cache[[type]] <- readRDS(file.path(DATA_DIR, paste0("seq_", type, ".rds")))
+  }
+  .seq_cache[[type]]
+}
+
+# ---- Gene labels and input parsing ------------------------------------------
+
+first_name <- sub(" \\|.*$", "", genes$gene_name)
+names(first_name) <- genes$gene
+
+gene_short <- function(ids) {
+  nm <- unname(first_name[ids])
+  ifelse(is.na(nm), ids, paste(ids, nm))
+}
+
+gene_desc <- function(ids) {
+  d <- genes[ids, "blast2go"]
+  e <- genes[ids, "ensembl_description"]
+  ifelse(is.na(d), ifelse(is.na(e), "", e), d)
+}
+
+name_lookup <- local({
+  nm <- toupper(first_name)
+  ok <- !is.na(nm) & !duplicated(nm)
+  setNames(genes$gene[ok], nm[ok])
+})
+
+known_ids <- unique(c(genes$gene, rownames(expr$tpm), phos$meta$protein, ortho$members$gene))
+
+# Accepts MGG IDs (MGG_01234, MGG01234, MGG_01234T0) and gene names (PMK1)
+parse_gene_input <- function(txt) {
+  tok <- unlist(strsplit(toupper(txt %||% ""), "[[:space:],;]+"))
+  tok <- unique(tok[nzchar(tok)])
+  tok <- sub("^MGG_?([0-9]{5})(T[0-9]+)?$", "MGG_\\1", tok)
+  id  <- ifelse(tok %in% known_ids, tok, unname(name_lookup[tok]))
+  list(ids = unique(id[!is.na(id)]), missing = tok[is.na(id)])
+}
+
+# ---- Example gene sets --------------------------------------------------------
+
+EX_SIGNALLING <- c("MGG_09565", "MGG_12958", "MGG_14847", "MGG_00800", "MGG_04943",
+                   "MGG_01822", "MGG_06368", "MGG_09898", "MGG_05871", "MGG_03860")
+EX_PHYLO      <- c("MGG_09565", "MGG_12958", "MGG_06368", "MGG_09898", "MGG_05871",
+                   "MGG_07219", "MGG_05059", "MGG_02252", "MGG_10315", "MGG_13863", "MGG_04795")
+EX_PHOSPHO    <- "MGG_00800"
+EX_GO_MODULE  <- "Module 7"
+ex_go_genes   <- function(module = EX_GO_MODULE) genes$gene[which(genes$wgcna_module == module)]
+
+# ---- Expression helpers -------------------------------------------------------
+
+EXP_SHORT <- c("Guy11 - in planta" = "Guy11 in planta",
+               "Guy11 - hydrophobic surface" = "Guy11 hydrophobic",
+               "Guy11 - hydrophilic surface" = "Guy11 hydrophilic",
+               "Δpmk1 - hydrophobic surface" = "Δpmk1 hydrophobic",
+               "Pmk1 AS Mutant" = "Pmk1 AS mutant")
+expr$conditions$short <- unname(EXP_SHORT[expr$conditions$experiment])
+
+transform_expr <- function(m, scale) {
+  if (scale == "tpm") return(m)
+  l <- log2(m + 1)
+  if (scale == "log") return(l)
+  z <- t(scale(t(l)))
+  z[!is.finite(z)] <- NA
+  z
+}
+scale_label <- c(log = "log₂(TPM + 1)", tpm = "TPM", z = "Row z-score")
+
+cluster_order <- function(m) {
+  if (nrow(m) < 3) return(seq_len(nrow(m)))
+  m[is.na(m)] <- 0
+  stats::hclust(stats::dist(m), method = "average")$order
+}
+
+# ---- Phospho helpers ----------------------------------------------------------
+
+phos$meta$site_label <- make.unique(paste0(
+  ifelse(is.na(phos$meta$sites), "site ?", phos$meta$sites), "  ",
+  ifelse(nchar(phos$meta$peptide) > 16, paste0(substr(phos$meta$peptide, 1, 15), "…"),
+         phos$meta$peptide)), sep = " #")
+phos_proteins <- sort(unique(phos$meta$protein))
+phos_n <- table(phos$meta$protein)
+HPI <- c(0, 1, 1.5, 2, 4, 6)
+SAMPLES <- c("Guy11", "Δpmk1")
+
+# ---- Pfam domains (e.g. "AMP-binding enzyme (PF00501) 79->373") ---------------
+
+parse_pfam <- function(x) {
+  if (is.na(x) || !nzchar(x)) return(NULL)
+  m <- regmatches(x, gregexpr("[^,]+? \\((PF[0-9]+)\\) [0-9]+->[0-9]+", x))[[1]]
+  if (!length(m)) return(NULL)
+  data.frame(
+    name  = trimws(sub(" \\(PF[0-9]+\\).*$", "", m)),
+    pfam  = sub(".*\\((PF[0-9]+)\\).*", "\\1", m),
+    start = as.integer(sub(".* ([0-9]+)->.*", "\\1", m)),
+    end   = as.integer(sub(".*->([0-9]+)$", "\\1", m)),
+    stringsAsFactors = FALSE
+  )
+}
+
+site_positions <- function(sites) {
+  pos <- regmatches(sites, gregexpr("[STY][0-9]+", sites))
+  lapply(pos, function(p) data.frame(residue = substr(p, 1, 1),
+                                     pos = as.integer(substring(p, 2))))
+}
+
+# ---- GO helpers ---------------------------------------------------------------
+
+go_terms <- go_db$terms
+go_terms$idx <- seq_len(nrow(go_terms))
+go_gene_terms <- split(go_db$term_idx, go_db$gene_idx)   # gene index -> term indices
+names(go_gene_terms) <- go_db$genes[as.integer(names(go_gene_terms))]
+ONT_NAMES <- c(BP = "Biological process", MF = "Molecular function", CC = "Cellular component")
+ont_universe <- lapply(c(BP = "BP", MF = "MF", CC = "CC"), function(o) {
+  keep <- go_terms$ont[go_db$term_idx] == o
+  unique(go_db$genes[go_db$gene_idx[keep]])
+})
+
+go_enrich <- function(query, ont, background = NULL, min_size = 5, max_size = 500,
+                      adjust = "BH") {
+  universe <- ont_universe[[ont]]
+  if (length(background)) universe <- intersect(universe, background)
+  q <- intersect(query, universe)
+  N <- length(universe); n <- length(q)
+  if (n == 0) return(list(table = NULL, n_query = 0, n_universe = N, n_tested = 0))
+  in_ont <- go_terms$ont == ont
+  term_of <- function(ids) {
+    t <- unlist(go_gene_terms[ids], use.names = FALSE)
+    t[in_ont[t]]
+  }
+  K <- tabulate(term_of(universe), nbins = nrow(go_terms))
+  k <- tabulate(term_of(q), nbins = nrow(go_terms))
+  tested <- which(in_ont & K >= min_size & K <= max_size)
+  p <- stats::phyper(k[tested] - 1, K[tested], N - K[tested], n, lower.tail = FALSE)
+  res <- data.frame(
+    go_id = go_terms$go[tested], term = go_terms$term[tested], ontology = ont,
+    annotated = K[tested], significant = k[tested],
+    expected = round(K[tested] * n / N, 2),
+    fold_enrichment = round((k[tested] / n) / (K[tested] / N), 2),
+    p_value = p, p_adj = stats::p.adjust(p, method = adjust),
+    stringsAsFactors = FALSE
+  )
+  res <- res[res$significant > 0, ]
+  res <- res[order(res$p_value, -res$fold_enrichment), ]
+  # Query genes annotated to each reported term
+  qt <- lapply(q, function(g) go_terms$go[intersect(go_gene_terms[[g]], tested)])
+  names(qt) <- q
+  pairs <- data.frame(gene = rep(q, lengths(qt)), go = unlist(qt), stringsAsFactors = FALSE)
+  res$genes <- vapply(res$go_id, function(id) paste(pairs$gene[pairs$go == id], collapse = ", "), "")
+  rownames(res) <- NULL
+  list(table = res, pairs = pairs, n_query = n, n_universe = N, n_tested = length(tested))
+}
+
+# ---- External links -----------------------------------------------------------
+
+url_uniprot   <- function(acc) paste0("https://www.uniprot.org/uniprotkb/", acc, "/entry")
+url_alphafold <- function(acc) paste0("https://alphafold.ebi.ac.uk/entry/", acc)
+url_interpro  <- function(acc) paste0("https://www.ebi.ac.uk/interpro/protein/UniProt/", acc, "/")
+url_ensembl   <- function(g) paste0("https://fungi.ensembl.org/Multi/Search/Results?species=all;idx=;q=", g)
+url_pfam      <- function(pf) paste0("https://www.ebi.ac.uk/interpro/entry/pfam/", pf, "/")
+url_quickgo   <- function(go) paste0("https://www.ebi.ac.uk/QuickGO/term/", go)
+url_pubmed    <- function(q) paste0("https://pubmed.ncbi.nlm.nih.gov/?term=", utils::URLencode(q))
+
+xref_html <- function(href, label, cls = "xref") {
+  ifelse(is.na(href), "",
+         sprintf('<a href="%s" target="_blank" rel="noopener" class="%s">%s</a>', href, cls, label))
+}
+
+xref_links_html <- function(g) {
+  r <- genes[g, ]
+  paste0(
+    xref_html(ifelse(is.na(r$uniprot_acc), NA, url_uniprot(r$uniprot_acc)), "UniProt"),
+    xref_html(ifelse(is.na(r$alphafold_acc), NA, url_alphafold(r$alphafold_acc)), "AlphaFold"),
+    xref_html(url_ensembl(r$gene), "Ensembl"),
+    xref_html(ifelse(is.na(r$uniprot_acc), NA, url_interpro(r$uniprot_acc)), "InterPro")
+  )
+}
+
+linkify <- function(x) {
+  if (is.na(x) || !nzchar(x)) return(NULL)
+  parts <- strsplit(x, " \\| ")[[1]]
+  tagList(lapply(seq_along(parts), function(i) {
+    p <- parts[i]
+    sep <- if (i < length(parts)) tags$br()
+    if (grepl("^https?://", p)) {
+      lab <- if (grepl("pubmed.ncbi.nlm.nih.gov/([0-9]+)", p))
+        paste0("PMID ", sub(".*pubmed.ncbi.nlm.nih.gov/([0-9]+).*", "\\1", p)) else p
+      tagList(tags$a(href = p, target = "_blank", rel = "noopener", lab), sep)
+    } else tagList(p, sep)
+  }))
+}
+
+# ---- FASTA --------------------------------------------------------------------
+
+wrap_seq <- function(s, width = 60) {
+  vapply(s, function(x) {
+    if (is.na(x) || !nzchar(x)) return("")
+    st <- seq(1, nchar(x), by = width)
+    paste(substring(x, st, pmin(st + width - 1, nchar(x))), collapse = "\n")
+  }, "", USE.NAMES = FALSE)
+}
+
+fasta_text <- function(ids, type = "protein", isoforms = FALSE) {
+  s <- get_seqs(type)
+  keep <- s$gene %in% ids
+  if (!isoforms) keep <- keep & !duplicated(s$gene)
+  if (!any(keep)) return("")
+  g <- s$gene[keep]
+  hdr <- paste0(">", s$transcript[keep], " gene=", g,
+                ifelse(is.na(first_name[g]), "", paste0(" name=", first_name[g])),
+                " ", gene_desc(g), " [", type, "; MG8]")
+  paste0(hdr, "\n", wrap_seq(s$seq[keep]), collapse = "\n")
+}
+
+write_tsv <- function(df, file) {
+  utils::write.table(df, file, sep = "\t", quote = FALSE, row.names = FALSE, na = "")
+}
+
+# =============================================================================
+# VISUAL SYSTEM
+# Categorical, sequential and diverging palettes follow a validated reference
+# palette (colour-vision-deficiency safe in the order given).
+# =============================================================================
+
+BRAND   <- "#1B9E77"
+INK     <- "#1d2b2a"
+INK2    <- "#52514e"
+MUTED   <- "#8a8984"
+GRID    <- "#ececea"
+AXIS    <- "#c9c8c2"
+SURFACE <- "#ffffff"
+FONT    <- "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+
+SERIES <- c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948")
+COL_SAMPLE <- c("Guy11" = "#1baf7a", "Δpmk1" = "#eb6834")
+SEQ_RAMP <- c("#f4f8fd", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b")
+DIV_RAMP <- c("#184f95", "#3987e5", "#9ec5f4", "#f0efec", "#f3a9a8", "#e34948", "#a62b2b")
+LIFESTYLES <- c("Hemibiotroph", "Biotroph", "Necrotroph", "Endophyte", "Symbiont",
+                "Saprophyte", "Commensal")
+COL_LIFESTYLE <- setNames(SERIES[seq_along(LIFESTYLES)], LIFESTYLES)
+COL_APPRESS <- c(None = "#e6e6e2", Hyaline = "#c2c1ba", Compound = "#8f8e87", Melanized = "#4a4945")
+
+colorscale <- function(cols) {
+  n <- length(cols)
+  lapply(seq_len(n), function(i) list((i - 1) / (n - 1), cols[i]))
+}
+
+ax <- function(title = NULL, ...) {
+  modifyList(list(
+    title = list(text = title, font = list(size = 12, color = INK2)),
+    gridcolor = GRID, zeroline = FALSE, showline = TRUE, linecolor = AXIS,
+    ticks = "outside", tickcolor = AXIS, ticklen = 4,
+    tickfont = list(size = 11, color = INK2), automargin = TRUE
+  ), list(...))
+}
+
+finish_plot <- function(p, file = "magnagenes_plot", legend = TRUE, ...) {
+  p |>
+    layout(
+      font = list(family = FONT, size = 12, color = INK),
+      paper_bgcolor = SURFACE, plot_bgcolor = SURFACE,
+      hoverlabel = list(bgcolor = SURFACE, bordercolor = AXIS,
+                        font = list(family = FONT, size = 12, color = INK)),
+      showlegend = legend,
+      legend = list(orientation = "h", x = 0, y = 1.02, yanchor = "bottom",
+                    font = list(size = 11, color = INK2)),
+      ...
+    ) |>
+    config(displaylogo = FALSE,
+           toImageButtonOptions = list(format = "svg", filename = file),
+           modeBarButtonsToRemove = c("lasso2d", "select2d", "autoScale2d",
+                                      "hoverCompareCartesian", "hoverClosestCartesian"))
+}
+
+empty_plot <- function(msg) {
+  plot_ly(type = "scatter", mode = "markers") |>
+    layout(xaxis = list(visible = FALSE), yaxis = list(visible = FALSE),
+           annotations = list(list(text = msg, showarrow = FALSE, xref = "paper", yref = "paper",
+                                   x = 0.5, y = 0.5, font = list(size = 14, color = MUTED))),
+           paper_bgcolor = SURFACE, plot_bgcolor = SURFACE) |>
+    config(displayModeBar = FALSE)
+}
+
+theme_mg <- function(base = 10) {
+  theme_bw(base_size = base) +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(colour = GRID, linewidth = 0.3),
+          panel.border = element_rect(colour = AXIS, linewidth = 0.4, fill = NA),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold", hjust = 0, colour = INK),
+          strip.clip = "off",
+          axis.ticks = element_line(colour = AXIS, linewidth = 0.3),
+          axis.text = element_text(colour = INK2),
+          legend.position = "bottom", legend.key = element_blank(),
+          plot.title = element_text(face = "bold", colour = INK))
+}
+
+# Plain-ASCII text for PDF figures (the PDF device lacks subscripts and ellipses)
+pdf_safe <- function(x) {
+  x <- gsub("\u2081\u2080", "10", x)
+  x <- gsub("\u2082", "2", x)
+  x <- gsub("\u2212", "-", x)
+  x <- gsub("\u0394", "delta-", x)
+  gsub("\u2026", "...", x)
+}
+
+# Experiment names as plotmath, so PDF strips show a real Delta and italic pmk1
+EXP_PARSE <- c("Guy11 - in planta" = "'Guy11 in planta'",
+               "Guy11 - hydrophobic surface" = "'Guy11 hydrophobic'",
+               "Guy11 - hydrophilic surface" = "'Guy11 hydrophilic'",
+               "\u0394pmk1 - hydrophobic surface" = "Delta*italic(pmk1)~'hydrophobic'",
+               "Pmk1 AS Mutant" = "'Pmk1 AS'")
+
+# PDF download handler for a ggplot (or a function that draws one).
+pdf_download <- function(make_plot, name, width, height) {
+  downloadHandler(
+    filename = function() paste0(name(), "_", format(Sys.Date(), "%Y%m%d"), ".pdf"),
+    content = function(file) {
+      g <- make_plot()
+      grDevices::pdf(file, width = width(), height = height(), useDingbats = FALSE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      if (is.function(g)) g() else print(g)
+    }
+  )
+}
+
+# =============================================================================
+# UI HELPERS
+# =============================================================================
+
+feature_card <- function(target, icon_name, title, text) {
+  tags$button(
+    type = "button", class = "feature-card",
+    onclick = sprintf("Shiny.setInputValue('nav_to', '%s', {priority: 'event'})", target),
+    div(class = "feature-icon", icon(icon_name)),
+    div(class = "feature-title", title),
+    div(class = "feature-text", text)
+  )
+}
+
+stat_tile <- function(value, label, sub = NULL) {
+  div(class = "stat-tile",
+      div(class = "stat-value", value),
+      div(class = "stat-label", label),
+      if (!is.null(sub)) div(class = "stat-sub", sub))
+}
+
+example_link <- function(id, label = "Load example") {
+  actionLink(id, tagList(icon("flask"), label), class = "example-link")
+}
+
+download_group <- function(...) div(class = "download-group", ...)
+
+pdf_size_inputs <- function(prefix, w = 10, h = 6) {
+  div(class = "pdf-size",
+      numericInput(paste0(prefix, "_w"), "PDF width (in)", w, min = 3, max = 30, step = 0.5),
+      numericInput(paste0(prefix, "_h"), "Height (in)", h, min = 3, max = 30, step = 0.5))
+}
+
+section_note <- function(...) div(class = "section-note", ...)
+
+# =============================================================================
+# STYLES
+# =============================================================================
+
+app_css <- HTML("
+:root {
+  --brand: #1B9E77; --brand-dark: #137a5c; --brand-tint: rgba(225, 247, 236, 0.9);
+  --brand-tint-solid: #e6f6ee; --ink: #1d2b2a; --ink-2: #52514e; --muted: #8a8984;
+  --line: #e3e3df; --surface: #ffffff; --page: #f6f8f7;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+body { background: var(--page); color: var(--ink); }
+.navbar { background: var(--brand) !important; border-bottom: 0; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+.navbar .navbar-brand { color: #fff !important; font-weight: 700; letter-spacing: .01em; display:flex; align-items:center; gap:.5rem; }
+.navbar .navbar-brand .brand-mark { width: 30px; height: 30px; border-radius: 7px; background: #fff; color: var(--brand-dark); display:inline-flex; align-items:center; justify-content:center; font-size: 15px; font-weight: 800; }
+.navbar .navbar-brand .brand-version { font-weight: 500; color: rgba(255,255,255,.75); font-size: .85em; }
+.navbar .nav-link { color: rgba(255,255,255,.88) !important; font-weight: 500; }
+.navbar .nav-link:hover { color: #fff !important; }
+.navbar .nav-link.active { color: #fff !important; font-weight: 600; box-shadow: inset 0 -3px 0 #fff; }
+.navbar .navbar-toggler { border-color: rgba(255,255,255,.6); }
+.card { border: 1px solid var(--line); border-radius: 10px; box-shadow: none; }
+.card-header { background: #fff; border-bottom: 1px solid var(--line); font-weight: 600; }
+.bslib-sidebar-layout > .sidebar { background: var(--brand-tint-solid); border-right: 1px solid var(--line); }
+.bslib-sidebar-layout > .sidebar .sidebar-title { color: var(--brand-dark); font-weight: 700; }
+.sidebar .form-label, .sidebar label { font-weight: 600; font-size: .86rem; color: var(--ink); }
+.sidebar textarea { font-family: var(--mono); font-size: .82rem; }
+.btn-primary { background: var(--brand); border-color: var(--brand); }
+.btn-primary:hover, .btn-primary:focus { background: var(--brand-dark); border-color: var(--brand-dark); }
+.btn-outline-primary { color: var(--brand-dark); border-color: var(--brand); }
+.btn-outline-primary:hover { background: var(--brand); border-color: var(--brand); color: #fff; }
+.download-group { display: flex; flex-direction: column; gap: .4rem; }
+.download-group .btn { text-align: left; font-size: .85rem; }
+.example-link { font-size: .83rem; color: var(--brand-dark); }
+.section-note { font-size: .82rem; color: var(--ink-2); line-height: 1.45; }
+.sidebar-heading { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 700; margin: .4rem 0 .2rem; }
+.pdf-size { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.pdf-size .form-group { margin-bottom: .3rem; }
+
+/* ---- Home ---- */
+.hero { position: relative; border-radius: 14px; overflow: hidden; min-height: 300px; color: #fff;
+  background-image: linear-gradient(100deg, rgba(14,61,48,.92) 0%, rgba(19,122,92,.78) 45%, rgba(27,158,119,.15) 100%), url('appressoria_sem.jpg');
+  background-size: cover; background-position: center; padding: 3rem 2.5rem; margin-bottom: 1.5rem; }
+.hero h1 { font-weight: 800; font-size: 2.6rem; margin-bottom: .3rem; letter-spacing: -.01em; }
+.hero h1 .v { font-weight: 400; opacity: .85; }
+.hero .lead { max-width: 640px; font-size: 1.12rem; opacity: .95; }
+.hero .hero-credit { font-size: .85rem; opacity: .85; margin-top: 1rem; }
+.hero .hero-caption { position: absolute; right: 14px; bottom: 10px; font-size: .72rem; opacity: .8; }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: .9rem; margin-bottom: 1.5rem; }
+.stat-tile { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; }
+.stat-value { font-size: 1.7rem; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.stat-label { font-size: .85rem; color: var(--ink-2); margin-top: .2rem; }
+.stat-sub { font-size: .75rem; color: var(--muted); }
+.feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.feature-card { text-align: left; background: var(--brand-tint); border: 1px solid #cfeadc; border-radius: 10px; padding: 1.1rem 1.2rem; cursor: pointer; transition: box-shadow .15s, transform .15s, background .15s; min-height: 44px; }
+.feature-card:hover, .feature-card:focus { background: rgba(200, 240, 220, 0.95); box-shadow: 0 4px 10px rgba(0,0,0,.08); transform: translateY(-1px); outline: none; }
+.feature-icon { width: 38px; height: 38px; border-radius: 9px; background: var(--brand); color: #fff; display: flex; align-items: center; justify-content: center; margin-bottom: .6rem; }
+.feature-title { font-weight: 700; color: var(--brand-dark); margin-bottom: .25rem; font-size: 1.02rem; }
+.feature-text { font-size: .88rem; color: var(--ink-2); line-height: 1.45; }
+.home-split { display: grid; grid-template-columns: 1.1fr .9fr; gap: 1rem; margin-bottom: 1.5rem; }
+@media (max-width: 900px) { .home-split { grid-template-columns: 1fr; } .hero { padding: 2rem 1.3rem; } .hero h1 { font-size: 2rem; } }
+.infobox { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 1.2rem 1.3rem; }
+.infobox h4 { color: var(--brand-dark); font-size: 1.05rem; font-weight: 700; }
+.credit-box { border-left: 4px solid var(--brand); }
+
+/* ---- Results ---- */
+.summary-strip { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .8rem; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: .35rem; padding: .25rem .65rem; border-radius: 999px; background: #fff; border: 1px solid var(--line); font-size: .82rem; color: var(--ink-2); }
+.chip b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.chip.warn { border-color: #f1c48a; background: #fff8ec; }
+.chip.ok { border-color: #bfe6d3; background: #f1faf5; }
+.send-bar { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-left: auto; }
+.send-bar .btn { font-size: .8rem; padding: .2rem .6rem; }
+.xref { display: inline-block; padding: .08rem .45rem; margin: 0 .25rem .2rem 0; border-radius: 5px; border: 1px solid #cfeadc; background: #f1faf5; color: var(--brand-dark) !important; font-size: .75rem; font-weight: 600; text-decoration: none; }
+.xref:hover { background: var(--brand); color: #fff !important; border-color: var(--brand); }
+.gene-id { font-family: var(--mono); font-weight: 600; font-size: .85rem; color: var(--ink); }
+.badge-effector { background: #fdeee6; color: #a3431b; border: 1px solid #f3c6ad; border-radius: 5px; font-size: .72rem; padding: .05rem .4rem; font-weight: 600; }
+.rt-table { font-size: .85rem; }
+
+/* ---- Gene profile ---- */
+.profile-head { display: flex; flex-wrap: wrap; gap: .6rem; align-items: baseline; margin-bottom: .2rem; }
+.profile-head .pid { font-family: var(--mono); font-size: 1.35rem; font-weight: 700; color: var(--ink); }
+.profile-head .pname { font-size: 1.25rem; font-weight: 700; color: var(--brand-dark); }
+.profile-desc { color: var(--ink-2); margin-bottom: .6rem; }
+.facts { display: grid; grid-template-columns: 170px 1fr; gap: .35rem .9rem; font-size: .88rem; margin: 0; }
+.facts dt { color: var(--muted); font-weight: 600; }
+.facts dd { margin: 0; color: var(--ink); word-break: break-word; }
+.profile-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .6rem 0 .2rem; }
+.seq-block { font-family: var(--mono); font-size: .78rem; background: #fafaf8; border: 1px solid var(--line); border-radius: 8px; padding: .8rem; max-height: 260px; overflow: auto; white-space: pre; }
+details > summary { cursor: pointer; color: var(--brand-dark); font-weight: 600; font-size: .9rem; }
+.protein-head h4 { margin: 0; font-weight: 700; }
+.protein-head .sub { color: var(--ink-2); font-size: .9rem; }
+.method-box { font-size: .82rem; color: var(--ink-2); background: #fafaf8; border: 1px solid var(--line); border-radius: 8px; padding: .7rem .9rem; margin-top: .6rem; }
+.footer-note { text-align: center; font-size: .78rem; color: var(--muted); padding: 1.2rem 0 1.6rem; }
+.footer-note a { color: var(--brand-dark); }
+.shiny-output-error-validation { color: var(--ink-2); font-size: .95rem; padding: 1.5rem; text-align: center; }
+.peptide-box { max-height: 260px; overflow-y: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; font-family: var(--mono); font-size: .76rem; }
+.peptide-box .checkbox { margin: .1rem 0; }
+.recalculating { opacity: .45; transition: opacity .25s; }
+")
+
+# =============================================================================
+# UI
+# =============================================================================
+
+n_species <- nrow(ortho$species)
+n_go_terms <- nrow(go_terms)
+
+home_panel <- nav_panel(
+  title = "Home", value = "home", icon = icon("house"),
+  div(class = "container-xxl py-3",
+    div(class = "hero",
+      h1("MagnaGenes ", span(class = "v", paste0("v", APP_VERSION))),
+      p(class = "lead",
+        "An integrated multi-omics resource for ", tags$em("Magnaporthe oryzae"),
+        " (", tags$em("Pyricularia oryzae"), "), the rice blast fungus: gene annotation, ",
+        "transcriptomics, phosphoproteomics, comparative genomics and Gene Ontology enrichment."),
+      div(class = "d-flex flex-wrap gap-2 mt-3",
+        actionButton("home_start", "Search genes", icon = icon("magnifying-glass"),
+                     class = "btn-light fw-semibold"),
+        actionButton("home_about", "About & credits", icon = icon("circle-info"),
+                     class = "btn-outline-light")),
+      div(class = "hero-caption", "Scanning electron micrograph: appressoria on a rice leaf")
+    ),
+    div(class = "stat-row",
+      stat_tile(format(nrow(genes), big.mark = ","), "annotated genes", "MG8 / 70-15 reference"),
+      stat_tile(nrow(expr$conditions), "RNA-seq conditions", paste(length(EXP_SHORT), "experiments")),
+      stat_tile(format(nrow(phos$meta), big.mark = ","), "phosphopeptides",
+                paste(format(length(phos_proteins), big.mark = ","), "proteins, Guy11 vs Δpmk1")),
+      stat_tile(n_species, "fungal species", "orthology with species tree"),
+      stat_tile(format(n_go_terms, big.mark = ","), "GO terms", "BP, MF and CC")
+    ),
+    div(class = "feature-grid",
+      feature_card("search", "magnifying-glass", "Gene Search",
+                   "Look up genes by MGG ID, gene name or keyword. Gene profiles with UniProt, AlphaFold DB, Ensembl and InterPro links, and FASTA export."),
+      feature_card("transcriptomics", "chart-line", "Transcriptomics",
+                   "Expression profiles, clustered heatmaps and gene-gene correlation across infection, surface and Pmk1 experiments."),
+      feature_card("phospho", "atom", "Phosphoproteomics",
+                   "Phosphosite abundance during appressorium development in Guy11 and Δpmk1, with fold-change heatmaps and protein site maps."),
+      feature_card("phylo", "sitemap", "Phylogenomics",
+                   "Ortholog counts across 42 fungi on the species tree, annotated by lifestyle and appressorium type."),
+      feature_card("go", "diagram-project", "GO Enrichment",
+                   "Over-representation analysis (Fisher's exact test, BH correction) with dot plots and gene-term matrices.")
+    ),
+    div(class = "home-split",
+      div(class = "infobox",
+        h4("About the organism"),
+        p(tags$em("Magnaporthe oryzae"), " causes rice blast, one of the most destructive diseases of rice, and also blast diseases of wheat and other grasses. ",
+          "Infection starts when a three-celled conidium lands on the leaf and forms a melanised appressorium. Enormous turgor in the appressorium drives a penetration peg into the plant cell, ",
+          "after which invasive hyphae spread from cell to cell. The Pmk1 MAP kinase pathway is essential for appressorium development."),
+        p(class = "section-note",
+          "MagnaGenes brings together datasets that cover this infection cycle so a gene can be followed from annotation to expression, phosphorylation and evolutionary conservation.")
+      ),
+      div(class = "infobox text-center",
+        tags$img(src = "infection_cycle.png", alt = "Infection cycle of Magnaporthe oryzae",
+                 style = "max-width: 100%; max-height: 300px;"),
+        div(class = "section-note mt-2", "The ", tags$em("M. oryzae"), " infection cycle on rice."))
+    ),
+    div(class = "home-split",
+      div(class = "infobox credit-box",
+        h4("Credits"),
+        p("MagnaGenes v2.0 is an extension of ",
+          tags$a("MagnaGenes v1.0", href = V1_URL, target = "_blank", rel = "noopener"),
+          " by Andrew Foster. It keeps the original datasets and design and adds a modern interface, more visualisations, FASTA export, cross-database links, and a serverless Shinylive build.")),
+      div(class = "infobox",
+        h4("Help us grow MagnaGenes"),
+        p("Join our community of curators and help extend the MagnaGenes database. ",
+          tags$a("Share your data and insights", target = "_blank", rel = "noopener",
+                 href = "https://docs.google.com/spreadsheets/d/1Zx-qdqlpkeoYlIeAlOVXnHNzLs95kjwhQWP-uXLioP0/edit?gid=0#gid=0"),
+          "."),
+        p(class = "section-note mb-0", "Questions or support: ", tags$strong("neha.sahu.tsl@gmail.com")))
+    )
+  )
+)
+
+search_panel <- nav_panel(
+  title = "Gene Search", value = "search", icon = icon("magnifying-glass"),
+  layout_sidebar(
+    fillable = FALSE,
+    sidebar = sidebar(
+      width = 330, title = "Query",
+      radioButtons("s_mode", NULL, inline = TRUE,
+                   choices = c("Gene IDs / names" = "id", "Keyword" = "kw")),
+      conditionalPanel(
+        "input.s_mode == 'id'",
+        textAreaInput("s_ids", "MGG IDs or gene names", rows = 6,
+                      value = paste(EX_SIGNALLING, collapse = "\n"),
+                      placeholder = "MGG_09565\nMST12\nMGG_06368"),
+        div(class = "section-note mb-2", "Separate by new lines, spaces or commas. Up to 2,000 genes."),
+        example_link("s_example", "Example: pathogenicity signalling genes")
+      ),
+      conditionalPanel(
+        "input.s_mode == 'kw'",
+        textInput("s_kw", "Keyword(s)", placeholder = "e.g. melanin, septin"),
+        selectInput("s_field", "Search in", choices = c(
+          "All fields" = "all", "Gene name" = "gene_name", "Description" = "desc",
+          "InterPro" = "interpro", "Pfam" = "pfam", "KEGG pathway" = "kegg",
+          "Mutant phenotype" = "phenotype", "Process affected" = "process",
+          "WGCNA module (exact)" = "wgcna_module")),
+        div(class = "section-note mb-2", "Comma-separated keywords match any term (case-insensitive).")
+      ),
+      checkboxInput("s_effector", "Effectors only", FALSE),
+      checkboxInput("s_pheno", "Genes with a mutant phenotype only", FALSE),
+      actionButton("s_go", "Search", icon = icon("magnifying-glass"), class = "btn-primary w-100"),
+      div(class = "sidebar-heading mt-3", "Download results"),
+      download_group(
+        downloadButton("s_dl_tsv", "Annotations (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("s_dl_pep", "Protein FASTA", class = "btn-outline-primary btn-sm"),
+        downloadButton("s_dl_cds", "CDS FASTA", class = "btn-outline-primary btn-sm")),
+      checkboxInput("s_isoforms", "Include all isoforms in FASTA", FALSE)
+    ),
+    uiOutput("s_summary"),
+    navset_card_underline(
+      id = "s_view",
+      nav_panel("Results", value = "table", reactableOutput("s_table")),
+      nav_panel("Gene profile", value = "profile",
+        div(class = "d-flex flex-wrap gap-2 align-items-end mb-2",
+            div(style = "min-width: 280px;",
+                selectizeInput("s_profile_gene", "Gene", choices = NULL, width = "100%"))),
+        uiOutput("s_profile"),
+        layout_columns(
+          col_widths = c(7, 5),
+          card(card_header("Expression across conditions"),
+               plotlyOutput("s_profile_expr", height = "300px")),
+          card(card_header("Protein architecture"),
+               plotlyOutput("s_profile_arch", height = "300px"))
+        )
+      )
+    )
+  )
+)
+
+tx_panel <- nav_panel(
+  title = "Transcriptomics", value = "transcriptomics", icon = icon("chart-line"),
+  layout_sidebar(
+    fillable = FALSE,
+    sidebar = sidebar(
+      width = 330, title = "Expression query",
+      textAreaInput("tx_genes", "Genes (IDs or names)", rows = 6,
+                    value = paste(EX_SIGNALLING, collapse = "\n")),
+      example_link("tx_example", "Example: pathogenicity signalling genes"),
+      checkboxGroupInput("tx_exps", "Experiments", choices = setNames(names(EXP_SHORT), EXP_SHORT),
+                         selected = names(EXP_SHORT)),
+      radioButtons("tx_scale", "Values", choices = c(
+        "log₂(TPM + 1)" = "log", "TPM" = "tpm", "Row z-score (of log₂)" = "z"),
+        selected = "log"),
+      checkboxInput("tx_cluster", "Cluster genes (heatmap, correlation)", TRUE),
+      actionButton("tx_go", "Plot expression", icon = icon("chart-line"), class = "btn-primary w-100"),
+      div(class = "sidebar-heading mt-3", "Download"),
+      download_group(
+        downloadButton("tx_dl_long", "Data, long format (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("tx_dl_wide", "Gene x condition matrix (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("tx_dl_pdf", "Current figure (PDF)", class = "btn-outline-primary btn-sm"),
+        downloadButton("tx_dl_fasta", "Protein FASTA", class = "btn-outline-primary btn-sm")),
+      pdf_size_inputs("tx_pdf", 11, 7),
+      section_note("Use the camera icon on any chart to save a vector SVG.")
+    ),
+    uiOutput("tx_summary"),
+    navset_card_underline(
+      id = "tx_view",
+      nav_panel("Expression profiles", value = "profiles", uiOutput("tx_profiles_ui")),
+      nav_panel("Heatmap", value = "heatmap", uiOutput("tx_heat_ui")),
+      nav_panel("Gene-gene correlation", value = "corr", uiOutput("tx_corr_ui")),
+      nav_panel("Data table", value = "table", reactableOutput("tx_table"))
+    )
+  )
+)
+
+ph_panel <- nav_panel(
+  title = "Phosphoproteomics", value = "phospho", icon = icon("atom"),
+  layout_sidebar(
+    fillable = FALSE,
+    sidebar = sidebar(
+      width = 340, title = "Phosphoproteome query",
+      selectizeInput("ph_protein", "Protein", choices = NULL,
+                     options = list(placeholder = "Type an MGG ID or gene name")),
+      div(class = "section-note mb-2",
+          textOutput("ph_protein_note", inline = TRUE)),
+      uiOutput("ph_peptides_ui"),
+      radioButtons("ph_scale", "Abundance scale", inline = TRUE,
+                   choices = c("log₂" = "log", "Linear" = "raw"), selected = "log"),
+      checkboxInput("ph_zero_na", "Treat zero abundance as missing", TRUE),
+      checkboxInput("ph_rowz", "Heatmap: row z-score", FALSE),
+      div(class = "sidebar-heading mt-3", "Download"),
+      download_group(
+        downloadButton("ph_dl_data", "Replicate data (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("ph_dl_stats", "Statistics (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("ph_dl_pdf", "Current figure (PDF)", class = "btn-outline-primary btn-sm"),
+        downloadButton("ph_dl_fasta", "Protein FASTA", class = "btn-outline-primary btn-sm")),
+      pdf_size_inputs("ph_pdf", 11, 7)
+    ),
+    uiOutput("ph_header"),
+    navset_card_underline(
+      id = "ph_view",
+      nav_panel("Phosphosite profiles", value = "profiles", uiOutput("ph_profiles_ui")),
+      nav_panel("Abundance heatmap", value = "heatmap", uiOutput("ph_heat_ui")),
+      nav_panel("Δpmk1 vs Guy11", value = "fc", uiOutput("ph_fc_ui")),
+      nav_panel("Protein site map", value = "map",
+        div(class = "d-flex flex-wrap gap-3 align-items-end",
+            selectInput("ph_map_time", "Fold change at", width = "200px",
+                        choices = c("Largest change" = "max", setNames(HPI, paste(HPI, "hpi"))))),
+        plotlyOutput("ph_map", height = "380px")),
+      nav_panel("Statistics", value = "table", reactableOutput("ph_table"),
+        div(class = "method-box",
+            "Welch two-sample t-test per phosphopeptide and time point on log₂ abundance (n = 3 biological replicates per group), ",
+            "Benjamini-Hochberg correction across all tests for this protein. With three replicates the power is limited, so treat p-values as a guide."))
+    )
+  )
+)
+
+og_panel <- nav_panel(
+  title = "Phylogenomics", value = "phylo", icon = icon("sitemap"),
+  layout_sidebar(
+    fillable = FALSE,
+    sidebar = sidebar(
+      width = 330, title = "Orthology query",
+      textAreaInput("og_genes", "Genes (IDs or names, up to 40)", rows = 6,
+                    value = paste(EX_PHYLO, collapse = "\n")),
+      example_link("og_example", "Example: signalling, melanin and effector genes"),
+      radioButtons("og_tree_mode", "Tree", inline = TRUE,
+                   choices = c("Phylogram" = "phylo", "Cladogram" = "clado")),
+      checkboxInput("og_show_counts", "Show counts in cells", TRUE),
+      actionButton("og_go", "Plot orthologs", icon = icon("sitemap"), class = "btn-primary w-100"),
+      div(class = "sidebar-heading mt-3", "Download"),
+      download_group(
+        downloadButton("og_dl_counts", "Ortholog counts (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("og_dl_members", "M. oryzae orthogroup members (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("og_dl_fasta", "Orthogroup members, protein FASTA", class = "btn-outline-primary btn-sm"),
+        downloadButton("og_dl_pdf", "Current figure (PDF)", class = "btn-outline-primary btn-sm")),
+      pdf_size_inputs("og_pdf", 12, 9)
+    ),
+    uiOutput("og_summary"),
+    navset_card_underline(
+      id = "og_view",
+      nav_panel("Ortholog profile", value = "profile", uiOutput("og_plot_ui")),
+      nav_panel("Conservation by lifestyle", value = "lifestyle", uiOutput("og_life_ui"),
+        div(class = "method-box", "Share of species in each lifestyle group with at least one ortholog (",
+            tags$em("M. oryzae"), " itself excluded).")),
+      nav_panel("M. oryzae orthogroup members", value = "members", reactableOutput("og_members")),
+      nav_panel("Data table", value = "table", reactableOutput("og_table"))
+    )
+  )
+)
+
+go_panel <- nav_panel(
+  title = "GO Enrichment", value = "go", icon = icon("diagram-project"),
+  layout_sidebar(
+    fillable = FALSE,
+    sidebar = sidebar(
+      width = 340, title = "Enrichment settings",
+      textAreaInput("go_genes", "Gene list (IDs or names)", rows = 6,
+                    value = paste(ex_go_genes(), collapse = "\n")),
+      div(class = "d-flex flex-wrap gap-2 align-items-center mb-2",
+          example_link("go_example", "Example: WGCNA module"),
+          selectInput("go_example_module", NULL, width = "130px",
+                      choices = paste("Module", 1:10), selected = EX_GO_MODULE)),
+      radioButtons("go_ont", "Ontology", choices = setNames(names(ONT_NAMES), ONT_NAMES)),
+      radioButtons("go_bg_mode", "Background", choices = c(
+        "All annotated genes" = "all", "Custom background list" = "custom")),
+      conditionalPanel("input.go_bg_mode == 'custom'",
+        textAreaInput("go_bg", NULL, rows = 4, placeholder = "Paste background genes")),
+      layout_columns(col_widths = c(6, 6),
+        numericInput("go_min", "Min term size", 5, min = 1, max = 500),
+        numericInput("go_max", "Max term size", 500, min = 10, max = 20000)),
+      layout_columns(col_widths = c(6, 6),
+        selectInput("go_adjust", "Correction", choices = c(
+          "Benjamini-Hochberg" = "BH", "Bonferroni" = "bonferroni", "None" = "none")),
+        numericInput("go_cutoff", "Adj. p cutoff", 0.05, min = 0, max = 1, step = 0.01)),
+      sliderInput("go_top", "Terms to plot", min = 5, max = 50, value = 20, step = 1),
+      actionButton("go_run", "Run enrichment", icon = icon("play"), class = "btn-primary w-100"),
+      div(class = "sidebar-heading mt-3", "Download"),
+      download_group(
+        downloadButton("go_dl_table", "Enrichment table (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("go_dl_pairs", "Gene-to-term pairs (TSV)", class = "btn-outline-primary btn-sm"),
+        downloadButton("go_dl_pdf", "Current figure (PDF)", class = "btn-outline-primary btn-sm")),
+      pdf_size_inputs("go_pdf", 10, 7)
+    ),
+    uiOutput("go_summary"),
+    navset_card_underline(
+      id = "go_view",
+      nav_panel("Dot plot", value = "dot", uiOutput("go_dot_ui")),
+      nav_panel("Bar chart", value = "bar", uiOutput("go_bar_ui")),
+      nav_panel("Gene-term matrix", value = "matrix", uiOutput("go_matrix_ui")),
+      nav_panel("Results table", value = "table", reactableOutput("go_table"))
+    ),
+    div(class = "method-box",
+        tags$strong("Method. "),
+        "One-sided Fisher's exact test (hypergeometric) on GO annotations propagated to all ancestor terms ",
+        "(the 'classic' algorithm), followed by multiple-testing correction. Only terms whose size falls within the chosen range are tested. ",
+        "Fold enrichment = (genes in term / genes in list) / (term size / background size).")
+  )
+)
+
+about_panel <- nav_panel(
+  title = "About", value = "about", icon = icon("circle-info"),
+  div(class = "container-xxl py-3", style = "max-width: 980px;",
+    div(class = "infobox credit-box mb-3",
+      h4("Credits"),
+      p(tags$strong("MagnaGenes v2.0"), " is an extension of MagnaGenes v1.0 by Andrew Foster, available at ",
+        tags$a("zenodo.org/records/4647766", href = V1_URL, target = "_blank", rel = "noopener"), "."),
+      p("Version 2.0 adds an integrated gene search, gene profiles with ",
+        "cross-references to UniProt, AlphaFold DB, Ensembl Fungi and InterPro, protein and CDS FASTA export, clustered heatmaps, ",
+        "correlation analysis, phosphosite statistics and site maps, a species-tree ortholog profile, and a lightweight ",
+        "GO enrichment engine. It runs entirely in the browser with Shinylive (webR), so no data leave your computer.")
+    ),
+    div(class = "infobox mb-3",
+      h4("Data sources"),
+      tags$ul(
+        tags$li(tags$strong("Gene annotation: "), "MagnaGenes curated annotation (BLAST2GO, InterPro, Pfam, KEGG, mutant phenotypes, effector predictions, literature). ",
+                "WGCNA co-expression modules from Yan et al. (2023), ", tags$em("The Plant Cell"), "."),
+        tags$li(tags$strong("Genome and sequences: "), "Ensembl Fungi release 60, ", tags$em("M. oryzae"),
+                " MG8 (strain 70-15) protein and CDS FASTA, chromosome coordinates and UniProt cross-references."),
+        tags$li(tags$strong("Transcriptomics: "), "Mean TPM for Guy11 in planta (conidia to 144 hpi), Guy11 on hydrophobic and hydrophilic surfaces, ",
+                "Δpmk1 on a hydrophobic surface, and the Pmk1 analogue-sensitive mutant (active vs inhibited)."),
+        tags$li(tags$strong("Phosphoproteomics: "), "Normalised phosphopeptide abundances for Guy11 and Δpmk1 at 0, 1, 1.5, 2, 4 and 6 hpi on a hydrophobic surface (three biological replicates)."),
+        tags$li(tags$strong("Orthology: "), "Orthogroups across 42 fungal species, with a species tree and lifestyle / appressorium annotation."),
+        tags$li(tags$strong("Gene Ontology: "), "MagnaGenes GO annotation, with term names and the ontology graph from ", go_db$source, ".")
+      )
+    ),
+    div(class = "infobox mb-3",
+      h4("Methods"),
+      tags$ul(
+        tags$li("Heatmap clustering: average-linkage hierarchical clustering on Euclidean distances of the displayed values."),
+        tags$li("Gene-gene correlation: Pearson correlation of log₂(TPM + 1) across the selected conditions."),
+        tags$li("Phosphosite positions: peptide start in the master protein plus the modified residue's position in the peptide. Ambiguous localisations are listed as ambiguous."),
+        tags$li("Phospho statistics: Welch t-test on log₂ abundance per time point, Benjamini-Hochberg correction within the protein."),
+        tags$li("GO enrichment: one-sided Fisher's exact test on propagated annotations, BH or Bonferroni correction.")
+      )
+    ),
+    div(class = "infobox",
+      h4("Contact"),
+      p("For questions or support, please contact the development team at ", tags$strong("neha.sahu.tsl@gmail.com"), "."),
+      p(class = "section-note mb-0", "Version ", APP_VERSION, ". Built with R, Shiny, bslib, plotly, ggplot2 and reactable.")
+    )
+  )
+)
+
+ui <- page_navbar(
+  id = "main_nav",
+  title = tags$span(tags$span(class = "brand-mark", "M"), "MagnaGenes",
+                    tags$span(class = "brand-version", paste0("v", APP_VERSION))),
+  window_title = "MagnaGenes v2.0",
+  theme = bs_theme(version = 5, bootswatch = "flatly", primary = BRAND, success = BRAND,
+                   base_font = font_collection("-apple-system", "BlinkMacSystemFont", "Segoe UI",
+                                               "Roboto", "Helvetica Neue", "Arial", "sans-serif"),
+                   "font-size-base" = "0.95rem"),
+  fillable = FALSE,
+  # Load plotly.js with the page so charts drawn inside tabs never race the script
+  header = tags$head(htmltools::attachDependencies(
+                       tags$span(), c(plot_ly()$dependencies, htmlwidgets::getDependency("plotly", "plotly"))),
+                     tags$style(app_css),
+                     tags$meta(name = "description", content = "MagnaGenes v2.0: multi-omics explorer for Magnaporthe oryzae")),
+  footer = div(class = "footer-note",
+               "MagnaGenes v", APP_VERSION, ". Runs entirely in your browser via Shinylive."),
+  home_panel, search_panel, tx_panel, ph_panel, og_panel, go_panel,
+  nav_spacer(), about_panel
+)
+
+# =============================================================================
+# SERVER
+# =============================================================================
+
+server <- function(input, output, session) {
+
+  # ---------------------------------------------------------------------------
+  # Navigation
+  # ---------------------------------------------------------------------------
+  observeEvent(input$nav_to, nav_select("main_nav", input$nav_to))
+  observeEvent(input$home_start, nav_select("main_nav", "search"))
+  observeEvent(input$home_about, nav_select("main_nav", "about"))
+
+  send_genes <- function(ids, target_input, target_tab, run_input = NULL) {
+    updateTextAreaInput(session, target_input, value = paste(ids, collapse = "\n"))
+    nav_select("main_nav", target_tab)
+  }
+
+  # ===========================================================================
+  # GENE SEARCH
+  # ===========================================================================
+  search_index <- local({
+    s <- function(x) ifelse(is.na(x), "", tolower(x))
+    list(
+      gene_name = s(genes$gene_name),
+      desc = paste(s(genes$blast2go), s(genes$ensembl_description)),
+      interpro = s(genes$interpro), pfam = s(genes$pfam), kegg = s(genes$kegg),
+      phenotype = s(genes$phenotype), process = s(genes$process),
+      wgcna_module = s(genes$wgcna_module),
+      all = paste(tolower(genes$gene), s(genes$gene_name), s(genes$blast2go),
+                  s(genes$ensembl_description), s(genes$interpro), s(genes$pfam),
+                  s(genes$kegg), s(genes$phenotype), s(genes$process),
+                  s(genes$wgcna_module), s(genes$uniprot_acc), sep = " ; ")
+    )
+  })
+
+  observeEvent(input$s_example, {
+    updateRadioButtons(session, "s_mode", selected = "id")
+    updateTextAreaInput(session, "s_ids", value = paste(EX_SIGNALLING, collapse = "\n"))
+  })
+
+  s_result <- eventReactive(input$s_go, {
+    if (identical(input$s_mode, "kw")) {
+      terms <- trimws(strsplit(tolower(input$s_kw %||% ""), ",")[[1]])
+      terms <- terms[nzchar(terms)]
+      validate(need(length(terms) > 0, "Enter a keyword to search."))
+      hay <- search_index[[input$s_field]]
+      hit <- Reduce(`|`, lapply(terms, function(t)
+        if (input$s_field == "wgcna_module") hay == t else grepl(t, hay, fixed = TRUE)))
+      ids <- genes$gene[hit]
+      missing <- character(0)
+      query <- paste0("“", paste(terms, collapse = "” or “"), "”")
+    } else {
+      p <- parse_gene_input(input$s_ids)
+      validate(need(length(p$ids) + length(p$missing) > 0, "Enter at least one MGG ID or gene name."))
+      ids <- head(intersect(p$ids, genes$gene), 2000)
+      missing <- c(p$missing, setdiff(p$ids, genes$gene))
+      query <- NULL
+    }
+    df <- genes[ids, , drop = FALSE]
+    if (isTRUE(input$s_effector)) df <- df[df$effector, , drop = FALSE]
+    if (isTRUE(input$s_pheno)) df <- df[!is.na(df$phenotype), , drop = FALSE]
+    list(df = df, missing = missing, query = query)
+  }, ignoreNULL = FALSE)
+
+  output$s_summary <- renderUI({
+    r <- s_result(); df <- r$df
+    div(class = "summary-strip",
+      span(class = "chip ok", icon("check"), tags$b(format(nrow(df), big.mark = ",")),
+           if (nrow(df) == 1) "gene" else "genes", if (!is.null(r$query)) paste("matching", r$query)),
+      if (length(r$missing))
+        span(class = "chip warn", icon("triangle-exclamation"), tags$b(length(r$missing)), "not found:",
+             paste(head(r$missing, 6), collapse = ", "), if (length(r$missing) > 6) "…"),
+      if (nrow(df)) span(class = "chip", tags$b(sum(df$effector)), "effectors"),
+      if (nrow(df)) span(class = "chip", tags$b(sum(!is.na(df$phenotype))), "with mutant phenotype"),
+      if (nrow(df)) div(class = "send-bar",
+        span(class = "section-note", "Send to:"),
+        actionButton("s_send_tx", "Transcriptomics", icon = icon("chart-line"), class = "btn-outline-primary"),
+        actionButton("s_send_og", "Phylogenomics", icon = icon("sitemap"), class = "btn-outline-primary"),
+        actionButton("s_send_go", "GO enrichment", icon = icon("diagram-project"), class = "btn-outline-primary"))
+    )
+  })
+
+  observeEvent(input$s_send_tx, send_genes(head(s_result()$df$gene, 200), "tx_genes", "transcriptomics"))
+  observeEvent(input$s_send_og, send_genes(head(s_result()$df$gene, 40), "og_genes", "phylo"))
+  observeEvent(input$s_send_go, send_genes(s_result()$df$gene, "go_genes", "go"))
+
+  output$s_table <- renderReactable({
+    df <- s_result()$df
+    validate(need(nrow(df) > 0, "No genes match this query."))
+    tab <- data.frame(
+      gene = df$gene,
+      name = ifelse(is.na(first_name[df$gene]), "", first_name[df$gene]),
+      description = gene_desc(df$gene),
+      length = df$length_aa,
+      effector = ifelse(df$effector, '<span class="badge-effector">effector</span>', ""),
+      process = ifelse(is.na(df$process), "", df$process),
+      module = ifelse(is.na(df$wgcna_module), "", df$wgcna_module),
+      links = vapply(df$gene, xref_links_html, "", USE.NAMES = FALSE),
+      stringsAsFactors = FALSE
+    )
+    rownames(tab) <- NULL
+    reactable(
+      tab, searchable = TRUE, highlight = TRUE, compact = TRUE, striped = FALSE,
+      defaultPageSize = 15, showPageSizeOptions = TRUE, pageSizeOptions = c(15, 30, 100),
+      selection = "single", onClick = "select",
+      theme = reactableTheme(borderColor = "#ececea", highlightColor = "#f1faf5",
+                             headerStyle = list(color = INK2, fontWeight = 600, fontSize = "0.8rem")),
+      columns = list(
+        gene = colDef(name = "Gene", minWidth = 110,
+                      cell = function(v) tags$span(class = "gene-id", v)),
+        name = colDef(name = "Name", minWidth = 80),
+        description = colDef(name = "Description", minWidth = 240),
+        length = colDef(name = "Length (aa)", minWidth = 80, align = "right"),
+        effector = colDef(name = "", html = TRUE, minWidth = 70, sortable = FALSE),
+        process = colDef(name = "Process affected", minWidth = 150),
+        module = colDef(name = "WGCNA", minWidth = 80),
+        links = colDef(name = "Databases", html = TRUE, minWidth = 230, sortable = FALSE)
+      )
+    )
+  })
+
+  observe({
+    df <- s_result()$df
+    ch <- if (nrow(df)) setNames(df$gene, gene_short(df$gene)) else character(0)
+    updateSelectizeInput(session, "s_profile_gene", choices = ch, selected = ch[1] %||% character(0),
+                         server = TRUE)
+  })
+
+  observeEvent(getReactableState("s_table", "selected"), {
+    sel <- getReactableState("s_table", "selected")
+    df <- s_result()$df
+    if (length(sel) && sel <= nrow(df)) {
+      g <- df$gene[sel]
+      updateSelectizeInput(session, "s_profile_gene",
+                           choices = setNames(df$gene, gene_short(df$gene)), selected = g, server = TRUE)
+      nav_select("s_view", "profile")
+    }
+  })
+
+  profile_gene <- reactive({
+    g <- input$s_profile_gene
+    req(g, g %in% genes$gene)
+    g
+  })
+
+  output$s_profile <- renderUI({
+    g <- profile_gene(); r <- genes[g, ]
+    nm <- first_name[[g]]
+    n_ph <- if (g %in% names(phos_n)) phos_n[[g]] else 0
+    og <- ortho$members$og[match(g, ortho$members$gene)]
+    n_sp <- if (!is.na(og)) sum(ortho$counts[og, ortho$species$code != "MGG"] > 0) else NA
+    n_go <- length(go_gene_terms[[g]] %||% integer(0))
+    loc <- if (!is.na(r$chr)) sprintf("Chromosome %s: %s-%s (%s strand)", r$chr,
+                                      format(r$start, big.mark = ","), format(r$end, big.mark = ","), r$strand) else "Not available"
+    pf <- parse_pfam(r$pfam)
+    seqs <- get_seqs("protein")
+    aa <- seqs$seq[match(g, seqs$gene)]
+    fact <- function(label, value) if (!is.null(value) && length(value) && !all(is.na(value)) && !identical(value, ""))
+      tagList(tags$dt(label), tags$dd(value))
+    card(
+      card_body(
+        div(class = "profile-head",
+            span(class = "pid", g),
+            if (!is.na(nm)) span(class = "pname", nm),
+            if (isTRUE(r$effector)) span(class = "badge-effector", "predicted effector")),
+        div(class = "profile-desc", gene_desc(g)),
+        div(HTML(xref_links_html(g)),
+            HTML(xref_html(url_pubmed(paste(g, if (!is.na(nm)) paste("OR", nm), "AND (Magnaporthe OR Pyricularia)")), "PubMed search"))),
+        layout_columns(
+          col_widths = c(6, 6), class = "mt-3",
+          tags$dl(class = "facts",
+            fact("Location (MG8)", loc),
+            fact("Transcript", r$transcript),
+            fact("Protein length", if (!is.na(r$length_aa)) paste(r$length_aa, "aa")),
+            fact("UniProt", if (!is.na(r$uniprot_acc)) tags$a(href = url_uniprot(r$uniprot_acc), target = "_blank", r$uniprot_acc)),
+            fact("AlphaFold DB", if (!is.na(r$alphafold_acc)) tags$a(href = url_alphafold(r$alphafold_acc), target = "_blank", paste("AF", r$alphafold_acc, "model")) else "No model listed"),
+            fact("WGCNA module", r$wgcna_module),
+            fact("KEGG pathway", r$kegg)),
+          tags$dl(class = "facts",
+            fact("InterPro", r$interpro),
+            fact("Pfam domains", if (!is.null(pf)) tagList(lapply(seq_len(nrow(pf)), function(i)
+              tagList(tags$a(href = url_pfam(pf$pfam[i]), target = "_blank", pf$pfam[i]),
+                      sprintf(" %s (%d-%d)", pf$name[i], pf$start[i], pf$end[i]), tags$br())))),
+            fact("Mutant phenotype", r$phenotype),
+            fact("Process affected", r$process),
+            fact("References", linkify(r$reference)),
+            fact("Other publications", linkify(r$other_reference)))
+        ),
+        div(class = "profile-actions",
+          actionButton("s_open_tx", "Expression", icon = icon("chart-line"), class = "btn-outline-primary btn-sm"),
+          if (n_ph > 0) actionButton("s_open_ph", sprintf("%d phosphopeptides", n_ph), icon = icon("atom"),
+                                     class = "btn-outline-primary btn-sm"),
+          if (!is.na(n_sp)) actionButton("s_open_og", sprintf("Orthologs in %d of %d species", n_sp, n_species - 1),
+                                         icon = icon("sitemap"), class = "btn-outline-primary btn-sm"),
+          span(class = "chip", tags$b(n_go), "GO terms (incl. ancestors)"),
+          downloadButton("s_dl_gene_pep", "Protein FASTA", class = "btn-outline-primary btn-sm"),
+          downloadButton("s_dl_gene_cds", "CDS FASTA", class = "btn-outline-primary btn-sm")),
+        if (!is.na(aa)) tags$details(class = "mt-2",
+          tags$summary(sprintf("Protein sequence (%d aa)", nchar(aa))),
+          div(class = "seq-block mt-2", paste0(">", g, "\n", wrap_seq(aa))))
+      )
+    )
+  })
+
+  observeEvent(input$s_open_tx, send_genes(profile_gene(), "tx_genes", "transcriptomics"))
+  observeEvent(input$s_open_og, send_genes(profile_gene(), "og_genes", "phylo"))
+  observeEvent(input$s_open_ph, {
+    updateSelectizeInput(session, "ph_protein", selected = profile_gene(),
+                         choices = setNames(phos_proteins, gene_short(phos_proteins)), server = TRUE)
+    nav_select("main_nav", "phospho")
+  })
+
+  output$s_dl_gene_pep <- downloadHandler(
+    filename = function() paste0(profile_gene(), "_protein.fasta"),
+    content = function(file) writeLines(fasta_text(profile_gene(), "protein", TRUE), file))
+  output$s_dl_gene_cds <- downloadHandler(
+    filename = function() paste0(profile_gene(), "_cds.fasta"),
+    content = function(file) writeLines(fasta_text(profile_gene(), "cds", TRUE), file))
+
+  output$s_profile_expr <- renderPlotly({
+    g <- profile_gene()
+    if (!g %in% rownames(expr$tpm)) return(empty_plot("No expression data for this gene"))
+    cd <- expr$conditions
+    v <- expr$tpm[g, cd$id]
+    plot_ly(x = list(cd$short, cd$sample), y = log2(v + 1), type = "bar",
+            marker = list(color = SERIES[1]),
+            customdata = round(v, 2),
+            hovertemplate = "%{x}<br>TPM %{customdata}<extra></extra>") |>
+      finish_plot(paste0(g, "_expression"), legend = FALSE,
+                  xaxis = ax(NULL, tickangle = -50, tickfont = list(size = 9, color = INK2), showgrid = FALSE),
+                  yaxis = ax("log₂(TPM + 1)"), bargap = 0.25,
+                  margin = list(t = 10, b = 10, l = 50, r = 10))
+  })
+
+  output$s_profile_arch <- renderPlotly({
+    g <- profile_gene()
+    protein_architecture_plot(g)
+  })
+
+  s_ids_for_download <- reactive(s_result()$df$gene)
+  output$s_dl_tsv <- downloadHandler(
+    filename = function() paste0("MagnaGenes_search_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) {
+      df <- s_result()$df
+      df$uniprot_url <- ifelse(is.na(df$uniprot_acc), NA, url_uniprot(df$uniprot_acc))
+      df$alphafold_url <- ifelse(is.na(df$alphafold_acc), NA, url_alphafold(df$alphafold_acc))
+      df$ensembl_url <- url_ensembl(df$gene)
+      write_tsv(df, file)
+    })
+  output$s_dl_pep <- downloadHandler(
+    filename = function() paste0("MagnaGenes_search_protein_", format(Sys.Date(), "%Y%m%d"), ".fasta"),
+    content = function(file) writeLines(fasta_text(s_ids_for_download(), "protein", isTRUE(input$s_isoforms)), file))
+  output$s_dl_cds <- downloadHandler(
+    filename = function() paste0("MagnaGenes_search_cds_", format(Sys.Date(), "%Y%m%d"), ".fasta"),
+    content = function(file) writeLines(fasta_text(s_ids_for_download(), "cds", isTRUE(input$s_isoforms)), file))
+
+  # Protein architecture: Pfam domains + phosphosites on the backbone
+  protein_architecture_plot <- function(g) {
+    len <- genes[g, "length_aa"]
+    if (is.na(len)) return(empty_plot("Protein length not available"))
+    pf <- parse_pfam(genes[g, "pfam"])
+    sites <- phos$meta[phos$meta$protein == g, ]
+    p <- plot_ly() |>
+      add_segments(x = 1, xend = len, y = 0, yend = 0, line = list(color = AXIS, width = 6),
+                   hoverinfo = "text", text = paste0(g, ": ", len, " aa"), showlegend = FALSE)
+    shapes <- list()
+    if (!is.null(pf)) {
+      dom_names <- unique(pf$name)
+      dcol <- setNames(if (length(dom_names) <= 8) SERIES[seq_along(dom_names)] else rep(SERIES[1], length(dom_names)), dom_names)
+      for (i in seq_len(nrow(pf))) {
+        shapes[[length(shapes) + 1]] <- list(type = "rect", x0 = pf$start[i], x1 = pf$end[i],
+                                             y0 = -0.32, y1 = 0.32, fillcolor = dcol[[pf$name[i]]],
+                                             line = list(color = SURFACE, width = 2), opacity = 0.9, layer = "above")
+      }
+      p <- p |> add_trace(x = (pf$start + pf$end) / 2, y = rep(0, nrow(pf)), type = "scatter", mode = "markers",
+                          marker = list(size = 18, opacity = 0), showlegend = FALSE, hoverinfo = "text",
+                          text = sprintf("<b>%s</b><br>%s<br>%d-%d aa", pf$name, pf$pfam, pf$start, pf$end))
+    }
+    if (nrow(sites)) {
+      sp <- site_positions(sites$sites)
+      sd <- do.call(rbind, lapply(seq_along(sp), function(i)
+        if (nrow(sp[[i]])) cbind(sp[[i]], peptide = sites$peptide[i]) else NULL))
+      if (!is.null(sd) && nrow(sd)) {
+        sd <- sd[!duplicated(sd$pos), ]
+        p <- p |>
+          add_segments(x = sd$pos, xend = sd$pos, y = 0.35, yend = 0.75, showlegend = FALSE,
+                       line = list(color = MUTED, width = 1), hoverinfo = "none") |>
+          add_trace(x = sd$pos, y = rep(0.8, nrow(sd)), type = "scatter", mode = "markers",
+                    name = "Phosphosite", showlegend = FALSE,
+                    marker = list(size = 9, color = COL_SAMPLE[[2]], line = list(color = SURFACE, width = 1.5)),
+                    hoverinfo = "text", text = sprintf("<b>p%s%d</b><br>%s", sd$residue, sd$pos, sd$peptide))
+      }
+    }
+    p |> finish_plot(paste0(g, "_architecture"), legend = FALSE,
+                     shapes = shapes,
+                     xaxis = ax("Residue", range = c(-len * 0.02, len * 1.02), showgrid = FALSE),
+                     yaxis = list(visible = FALSE, range = c(-0.9, 1.2), fixedrange = TRUE),
+                     annotations = list(list(
+                       text = if (nrow(sites)) "Domains: Pfam  ·  Markers: detected phosphosites" else "Domains: Pfam",
+                       x = 0, y = -0.75, xref = "paper", yref = "y", showarrow = FALSE, xanchor = "left",
+                       font = list(size = 10, color = MUTED))),
+                     margin = list(t = 10, b = 40, l = 20, r = 20))
+  }
+
+  # ===========================================================================
+  # TRANSCRIPTOMICS
+  # ===========================================================================
+  observeEvent(input$tx_example, updateTextAreaInput(session, "tx_genes", value = paste(EX_SIGNALLING, collapse = "\n")))
+
+  tx_query <- eventReactive(input$tx_go, {
+    p <- parse_gene_input(input$tx_genes)
+    ids <- head(intersect(p$ids, rownames(expr$tpm)), 200)
+    validate(need(length(ids) > 0, "None of the genes were found in the expression data."))
+    validate(need(length(input$tx_exps) > 0, "Select at least one experiment."))
+    cd <- expr$conditions[expr$conditions$experiment %in% input$tx_exps, ]
+    list(ids = ids, missing = c(p$missing, setdiff(p$ids, rownames(expr$tpm))), cond = cd,
+         m = expr$tpm[ids, cd$id, drop = FALSE])
+  }, ignoreNULL = FALSE)
+
+  tx_values <- reactive(transform_expr(tx_query()$m, input$tx_scale))
+
+  tx_long <- reactive({
+    q <- tx_query(); v <- tx_values()
+    data.frame(gene = rep(q$ids, times = ncol(v)),
+               name = rep(ifelse(is.na(first_name[q$ids]), "", first_name[q$ids]), times = ncol(v)),
+               experiment = rep(q$cond$experiment, each = nrow(v)),
+               sample = rep(q$cond$sample, each = nrow(v)),
+               TPM = as.vector(q$m), value = round(as.vector(v), 4),
+               stringsAsFactors = FALSE)
+  })
+
+  output$tx_summary <- renderUI({
+    q <- tx_query()
+    div(class = "summary-strip",
+      span(class = "chip ok", tags$b(length(q$ids)), "genes"),
+      span(class = "chip", tags$b(nrow(q$cond)), "conditions in", tags$b(length(unique(q$cond$experiment))), "experiments"),
+      if (length(q$missing)) span(class = "chip warn", icon("triangle-exclamation"), tags$b(length(q$missing)),
+                                  "not found:", paste(head(q$missing, 6), collapse = ", ")),
+      if (length(q$ids) > 8) span(class = "chip", icon("circle-info"),
+                                  "Profiles show the first 8 genes; the heatmap shows all."))
+  })
+
+  tx_profile_plot <- function(long, exps, scale) {
+    ids <- head(unique(long$gene), 8)
+    long <- long[long$gene %in% ids, ]
+    panels <- lapply(seq_along(exps), function(i) {
+      d <- long[long$experiment == exps[i], ]
+      lev <- expr$conditions$sample[expr$conditions$experiment == exps[i]]
+      p <- plot_ly()
+      for (j in seq_along(ids)) {
+        dj <- d[d$gene == ids[j], ]
+        dj <- dj[match(lev, dj$sample), ]
+        p <- p |> add_trace(
+          x = dj$sample, y = dj$value, type = "scatter", mode = "lines+markers",
+          name = gene_short(ids[j]), legendgroup = ids[j], showlegend = (i == 1),
+          line = list(color = SERIES[j], width = 2),
+          marker = list(color = SERIES[j], size = 8, line = list(color = SURFACE, width = 1.5)),
+          customdata = round(dj$TPM, 2),
+          hovertemplate = paste0("<b>", gene_short(ids[j]), "</b><br>%{x}<br>",
+                                 scale_label[[scale]], ": %{y:.2f}<br>TPM: %{customdata}<extra></extra>"))
+      }
+      p |> layout(xaxis = ax(NULL, categoryorder = "array", categoryarray = lev, showgrid = FALSE,
+                             tickangle = -40),
+                  yaxis = ax(if (i %% 2 == 1) scale_label[[scale]] else NULL))
+    })
+    nr <- ceiling(length(exps) / 2)
+    nc <- if (length(exps) == 1) 1 else 2
+    sp <- subplot(panels, nrows = nr, shareX = FALSE, shareY = FALSE, titleY = TRUE,
+                  margin = c(0.05, 0.03, 0.09, 0.06))
+    ann <- lapply(seq_along(exps), function(i) {
+      sfx <- if (i == 1) "" else i
+      list(text = paste0("<b>", EXP_SHORT[[exps[i]]], "</b>"), xref = paste0("x", sfx, " domain"),
+           yref = paste0("y", sfx, " domain"), x = 0, y = 1.04, xanchor = "left", yanchor = "bottom",
+           showarrow = FALSE, font = list(size = 12, color = INK))
+    })
+    sp |> finish_plot("expression_profiles", annotations = ann,
+                      legend = list(orientation = "h", x = 0, y = 1 + 0.16 / nr, yanchor = "bottom",
+                                    font = list(size = 11, color = INK2)),
+                      margin = list(t = 90, r = 20, b = 60, l = 60))
+  }
+
+  output$tx_profiles_ui <- renderUI({
+    nr <- ceiling(length(unique(tx_query()$cond$experiment)) / 2)
+    plotlyOutput("tx_profiles", height = paste0(120 + 290 * nr, "px"))
+  })
+  output$tx_profiles <- renderPlotly({
+    q <- tx_query()
+    tx_profile_plot(tx_long(), unique(q$cond$experiment), input$tx_scale)
+  })
+
+  tx_heat_data <- reactive({
+    q <- tx_query(); v <- tx_values()
+    ord <- if (isTRUE(input$tx_cluster)) cluster_order(v) else seq_len(nrow(v))
+    list(v = v[ord, , drop = FALSE], tpm = q$m[ord, , drop = FALSE], cond = q$cond)
+  })
+
+  heat_x_annotations <- function(cond) {
+    grp <- rle(cond$experiment)
+    ends <- cumsum(grp$lengths); starts <- ends - grp$lengths + 1
+    list(
+      shapes = lapply(head(ends, -1), function(e) list(type = "line", x0 = e + 0.5, x1 = e + 0.5,
+                                                       y0 = 0, y1 = 1, yref = "paper",
+                                                       line = list(color = INK, width = 1.5))),
+      annotations = lapply(seq_along(grp$values), function(k) list(
+        text = paste0("<b>", EXP_SHORT[[grp$values[k]]], "</b>"), x = (starts[k] + ends[k]) / 2, y = 1.01,
+        xref = "x", yref = "paper", yanchor = "bottom", showarrow = FALSE,
+        font = list(size = 10.5, color = INK)))
+    )
+  }
+
+  output$tx_heat_ui <- renderUI({
+    n <- length(tx_query()$ids)
+    plotlyOutput("tx_heat", height = paste0(max(320, 150 + 18 * n), "px"))
+  })
+  output$tx_heat <- renderPlotly({
+    h <- tx_heat_data(); v <- h$v; cd <- h$cond; scale <- input$tx_scale
+    ylab <- gene_short(rownames(v))
+    hover <- matrix(sprintf("<b>%s</b><br>%s, %s<br>TPM: %s<br>%s: %s",
+                            rep(ylab, ncol(v)), rep(cd$short, each = nrow(v)), rep(cd$sample, each = nrow(v)),
+                            signif(as.vector(h$tpm), 4), scale_label[[scale]], round(as.vector(v), 2)),
+                    nrow = nrow(v))
+    is_z <- scale == "z"
+    lim <- if (is_z) max(abs(v), na.rm = TRUE) else NULL
+    xa <- heat_x_annotations(cd)
+    plot_ly(x = seq_len(ncol(v)), y = ylab, z = v, type = "heatmap", text = hover, hoverinfo = "text",
+            colorscale = colorscale(if (is_z) DIV_RAMP else SEQ_RAMP),
+            zmin = if (is_z) -lim else NULL, zmax = if (is_z) lim else NULL,
+            xgap = 1, ygap = 1,
+            colorbar = list(title = list(text = scale_label[[scale]], side = "right"), thickness = 12, len = 0.6)) |>
+      finish_plot("expression_heatmap", legend = FALSE,
+                  shapes = xa$shapes, annotations = xa$annotations,
+                  xaxis = ax(NULL, tickvals = seq_len(ncol(v)), ticktext = cd$sample, tickangle = -50,
+                             showgrid = FALSE, showline = FALSE),
+                  yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE,
+                             tickfont = list(size = 10.5, color = INK)),
+                  margin = list(t = 40, r = 10, b = 90, l = 10))
+  })
+
+  tx_corr_data <- reactive({
+    q <- tx_query()
+    validate(need(length(q$ids) >= 2, "Correlation needs at least two genes."))
+    l <- log2(q$m + 1)
+    cm <- suppressWarnings(stats::cor(t(l), use = "pairwise.complete.obs"))
+    ord <- if (isTRUE(input$tx_cluster) && nrow(cm) > 2) {
+      d <- 1 - cm; d[is.na(d)] <- 1
+      stats::hclust(stats::as.dist(d), "average")$order
+    } else seq_len(nrow(cm))
+    cm[ord, ord, drop = FALSE]
+  })
+
+  output$tx_corr_ui <- renderUI({
+    n <- length(tx_query()$ids)
+    plotlyOutput("tx_corr", height = paste0(min(900, max(380, 140 + 20 * n)), "px"))
+  })
+  output$tx_corr <- renderPlotly({
+    cm <- tx_corr_data(); lab <- gene_short(rownames(cm))
+    hover <- matrix(sprintf("%s<br>%s<br>r = %s", rep(lab, ncol(cm)), rep(lab, each = nrow(cm)),
+                            round(as.vector(cm), 3)), nrow = nrow(cm))
+    plot_ly(x = lab, y = lab, z = cm, type = "heatmap", zmin = -1, zmax = 1, text = hover, hoverinfo = "text",
+            colorscale = colorscale(DIV_RAMP), xgap = 1, ygap = 1,
+            colorbar = list(title = list(text = "Pearson r", side = "right"), thickness = 12, len = 0.6)) |>
+      finish_plot("expression_correlation", legend = FALSE,
+                  xaxis = ax(NULL, tickangle = -50, showgrid = FALSE, showline = FALSE),
+                  yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE),
+                  margin = list(t = 20, r = 10, b = 10, l = 10))
+  })
+
+  output$tx_table <- renderReactable({
+    d <- tx_long()
+    names(d)[names(d) == "value"] <- scale_label[[input$tx_scale]]
+    reactable(d, searchable = TRUE, compact = TRUE, highlight = TRUE, defaultPageSize = 20,
+              filterable = TRUE,
+              columns = list(gene = colDef(name = "Gene", cell = function(v) tags$span(class = "gene-id", v)),
+                             TPM = colDef(format = colFormat(digits = 2)),
+                             experiment = colDef(name = "Experiment", minWidth = 180)))
+  })
+
+  output$tx_dl_long <- downloadHandler(
+    filename = function() paste0("MagnaGenes_expression_long_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) write_tsv(tx_long(), file))
+  output$tx_dl_wide <- downloadHandler(
+    filename = function() paste0("MagnaGenes_expression_matrix_", input$tx_scale, "_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) {
+      q <- tx_query(); v <- tx_values()
+      colnames(v) <- q$cond$id
+      write_tsv(data.frame(gene = rownames(v), name = first_name[rownames(v)], round(v, 4),
+                           check.names = FALSE), file)
+    })
+  output$tx_dl_fasta <- downloadHandler(
+    filename = function() paste0("MagnaGenes_expression_genes_protein_", format(Sys.Date(), "%Y%m%d"), ".fasta"),
+    content = function(file) writeLines(fasta_text(tx_query()$ids, "protein"), file))
+
+  tx_gg <- function() {
+    view <- input$tx_view %||% "profiles"; scale <- input$tx_scale
+    if (view %in% c("profiles", "table")) {
+      d <- tx_long()
+      ids <- head(unique(d$gene), 8)
+      d <- d[d$gene %in% ids, ]
+      d$label <- factor(gene_short(d$gene), gene_short(ids))
+      d$experiment <- factor(EXP_PARSE[d$experiment], EXP_PARSE)
+      d$sample <- factor(d$sample, expr$sample_levels)
+      ggplot(d, aes(sample, value, colour = label, group = label)) +
+        geom_line(linewidth = 0.6) + geom_point(size = 1.8) +
+        facet_wrap(~experiment, scales = "free_x", labeller = label_parsed) +
+        scale_colour_manual(values = SERIES) +
+        labs(x = NULL, y = pdf_safe(scale_label[[scale]]), colour = NULL) +
+        theme_mg() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    } else if (view == "heatmap") {
+      h <- tx_heat_data(); v <- h$v
+      d <- data.frame(gene = factor(rep(gene_short(rownames(v)), ncol(v)), rev(gene_short(rownames(v)))),
+                      experiment = factor(rep(EXP_PARSE[h$cond$experiment], each = nrow(v)), EXP_PARSE),
+                      sample = factor(rep(h$cond$sample, each = nrow(v)), expr$sample_levels),
+                      value = as.vector(v))
+      is_z <- scale == "z"; lim <- max(abs(d$value), na.rm = TRUE)
+      ggplot(d, aes(sample, gene, fill = value)) + geom_tile(colour = SURFACE, linewidth = 0.3) +
+        facet_grid(~experiment, scales = "free_x", space = "free_x", labeller = label_parsed) +
+        (if (is_z) scale_fill_gradientn(colours = DIV_RAMP, limits = c(-lim, lim), name = pdf_safe(scale_label[[scale]]))
+         else scale_fill_gradientn(colours = SEQ_RAMP, name = pdf_safe(scale_label[[scale]]))) +
+        labs(x = NULL, y = NULL) + theme_mg() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank(),
+              legend.position = "right")
+    } else {
+      cm <- tx_corr_data(); lab <- gene_short(rownames(cm))
+      d <- data.frame(a = factor(rep(lab, ncol(cm)), lab), b = factor(rep(lab, each = nrow(cm)), rev(lab)),
+                      r = as.vector(cm))
+      ggplot(d, aes(a, b, fill = r)) + geom_tile(colour = SURFACE, linewidth = 0.3) +
+        scale_fill_gradientn(colours = DIV_RAMP, limits = c(-1, 1), name = "Pearson r") +
+        labs(x = NULL, y = NULL) + coord_equal() + theme_mg() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank(),
+              legend.position = "right")
+    }
+  }
+  output$tx_dl_pdf <- pdf_download(tx_gg, function() paste0("MagnaGenes_expression_", input$tx_view %||% "profiles"),
+                                   reactive(input$tx_pdf_w %||% 11), reactive(input$tx_pdf_h %||% 7))
+
+  # ===========================================================================
+  # PHOSPHOPROTEOMICS
+  # ===========================================================================
+  updateSelectizeInput(session, "ph_protein", choices = setNames(phos_proteins, gene_short(phos_proteins)),
+                       selected = EX_PHOSPHO, server = TRUE)
+
+  ph_protein <- reactive({
+    req(input$ph_protein, input$ph_protein %in% phos_proteins)
+    input$ph_protein
+  })
+
+  ph_meta <- reactive(phos$meta[phos$meta$protein == ph_protein(), ])
+
+  output$ph_protein_note <- renderText({
+    paste0(format(length(phos_proteins), big.mark = ","), " proteins with phosphopeptides. ",
+           phos_n[[ph_protein()]], " peptide forms for this protein.")
+  })
+
+  output$ph_peptides_ui <- renderUI({
+    m <- ph_meta()
+    sel <- head(m$pid, 6)
+    tagList(
+      tags$label(class = "form-label", "Phosphopeptides (site, peptide)"),
+      div(class = "peptide-box",
+          checkboxGroupInput("ph_pids", NULL, choices = setNames(m$pid, m$site_label), selected = sel)),
+      div(class = "d-flex gap-3 mt-1 mb-2",
+          actionLink("ph_all", "Select all", class = "example-link"),
+          actionLink("ph_none", "Clear", class = "example-link"))
+    )
+  })
+  observeEvent(input$ph_all, updateCheckboxGroupInput(session, "ph_pids", selected = ph_meta()$pid))
+  observeEvent(input$ph_none, updateCheckboxGroupInput(session, "ph_pids", selected = character(0)))
+
+  ph_value <- function(a) if (input$ph_scale == "log") log2(a + 1) else a
+
+  ph_long_all <- reactive({
+    m <- ph_meta()
+    A <- phos$abundance[as.character(m$pid), , drop = FALSE]
+    if (isTRUE(input$ph_zero_na)) A[A == 0] <- NA
+    cols <- phos$columns
+    data.frame(pid = rep(m$pid, times = ncol(A)),
+               site = rep(m$site_label, times = ncol(A)),
+               peptide = rep(m$peptide, times = ncol(A)),
+               modifications = rep(m$modifications, times = ncol(A)),
+               sample = rep(cols$sample, each = nrow(A)), hpi = rep(cols$hpi, each = nrow(A)),
+               replicate = rep(cols$replicate, each = nrow(A)), abundance = as.vector(A),
+               stringsAsFactors = FALSE)
+  })
+
+  ph_summary <- function(d) {
+    d$value <- ph_value(d$abundance)
+    key <- interaction(d$pid, d$sample, d$hpi, drop = TRUE, lex.order = TRUE)
+    s <- do.call(rbind, lapply(split(d, key), function(x) {
+      v <- x$value[!is.na(x$value)]
+      data.frame(pid = x$pid[1], site = x$site[1], sample = x$sample[1], hpi = x$hpi[1],
+                 mean = if (length(v)) mean(v) else NA, sd = if (length(v) > 1) stats::sd(v) else NA,
+                 n = length(v))
+    }))
+    rownames(s) <- NULL
+    s
+  }
+
+  ph_stats <- reactive({
+    d <- ph_long_all()
+    d$l2 <- log2(d$abundance + 1)
+    res <- do.call(rbind, lapply(split(d, interaction(d$pid, d$hpi, drop = TRUE, lex.order = TRUE)), function(x) {
+      g <- x$l2[x$sample == SAMPLES[1] & !is.na(x$l2)]
+      k <- x$l2[x$sample == SAMPLES[2] & !is.na(x$l2)]
+      p <- if (length(g) >= 2 && length(k) >= 2 && (stats::var(g) > 0 || stats::var(k) > 0))
+        tryCatch(stats::t.test(k, g)$p.value, error = function(e) NA) else NA
+      data.frame(pid = x$pid[1], site = x$site[1], peptide = x$peptide[1], hpi = x$hpi[1],
+                 n_guy11 = length(g), n_pmk1 = length(k),
+                 mean_log2_guy11 = if (length(g)) mean(g) else NA,
+                 mean_log2_pmk1 = if (length(k)) mean(k) else NA,
+                 log2FC = if (length(g) && length(k)) mean(k) - mean(g) else NA,
+                 p_value = p, stringsAsFactors = FALSE)
+    }))
+    res$p_adj <- stats::p.adjust(res$p_value, "BH")
+    rownames(res) <- NULL
+    res[order(res$pid, res$hpi), ]
+  })
+
+  ph_selected <- reactive({
+    pids <- as.integer(input$ph_pids %||% integer(0))
+    pids <- intersect(pids, ph_meta()$pid)
+    validate(need(length(pids) > 0, "Select at least one phosphopeptide."))
+    pids
+  })
+
+  output$ph_header <- renderUI({
+    g <- ph_protein(); m <- ph_meta()
+    nm <- first_name[[g]] %||% NA
+    st <- ph_stats()
+    n_sig <- sum(st$p_adj < 0.05, na.rm = TRUE)
+    div(class = "summary-strip",
+      span(class = "gene-id", style = "font-size: 1.05rem;", g),
+      if (!is.na(nm)) span(style = "font-weight: 700; color: var(--brand-dark);", nm),
+      span(class = "section-note", gene_desc(g)),
+      span(class = "chip", tags$b(nrow(m)), "peptide forms"),
+      span(class = "chip", tags$b(length(unique(unlist(regmatches(m$sites, gregexpr("[STY][0-9]+", m$sites)))))), "localised sites"),
+      span(class = if (n_sig) "chip ok" else "chip", tags$b(n_sig), "tests with adj. p < 0.05"),
+      if (g %in% genes$gene) HTML(xref_links_html(g)))
+  })
+
+  ph_x_axis <- function(title = "Hours post inoculation") ax(title, tickvals = HPI, ticktext = HPI, showgrid = FALSE)
+
+  output$ph_profiles_ui <- renderUI({
+    n <- length(ph_selected())
+    nr <- ceiling(n / 2)
+    plotlyOutput("ph_profiles", height = paste0(90 + 260 * nr, "px"))
+  })
+  output$ph_profiles <- renderPlotly({
+    pids <- ph_selected()
+    d <- ph_long_all(); d <- d[d$pid %in% pids, ]
+    s <- ph_summary(d)
+    ylab <- if (input$ph_scale == "log") "log₂ abundance" else "Abundance"
+    legend_done <- c(FALSE, FALSE); names(legend_done) <- SAMPLES
+    panels <- lapply(seq_along(pids), function(i) {
+      p <- plot_ly()
+      for (smp in SAMPLES) {
+        ss <- s[s$pid == pids[i] & s$sample == smp, ]; ss <- ss[order(ss$hpi), ]
+        dd <- d[d$pid == pids[i] & d$sample == smp, ]
+        off <- if (smp == SAMPLES[1]) -0.06 else 0.06
+        show_leg <- !legend_done[[smp]] && any(!is.na(ss$mean))
+        if (show_leg) legend_done[[smp]] <<- TRUE
+        p <- p |>
+          add_trace(x = dd$hpi + off, y = ph_value(dd$abundance), type = "scatter", mode = "markers",
+                    name = smp, legendgroup = smp, showlegend = FALSE,
+                    marker = list(color = COL_SAMPLE[[smp]], size = 6, opacity = 0.55,
+                                  line = list(color = SURFACE, width = 1)),
+                    text = paste0(smp, ", ", dd$hpi, " hpi, ", dd$replicate),
+                    hovertemplate = "%{text}<br>%{y:.3s}<extra></extra>") |>
+          add_trace(x = ss$hpi + off, y = ss$mean, type = "scatter", mode = "lines+markers",
+                    name = smp, legendgroup = smp, showlegend = show_leg,
+                    error_y = list(type = "data", array = ss$sd, color = COL_SAMPLE[[smp]], thickness = 1.2, width = 3),
+                    line = list(color = COL_SAMPLE[[smp]], width = 2),
+                    marker = list(color = COL_SAMPLE[[smp]], size = 8, line = list(color = SURFACE, width = 1.5)),
+                    text = paste0("<b>", smp, "</b>, ", ss$hpi, " hpi<br>mean ", signif(ss$mean, 4),
+                                  " ± ", signif(ss$sd, 3), " (n = ", ss$n, ")"),
+                    hovertemplate = "%{text}<extra></extra>")
+      }
+      p |> layout(xaxis = ph_x_axis(if (i > length(pids) - 2) "Hours post inoculation" else NULL),
+                  yaxis = ax(if (i %% 2 == 1) ylab else NULL))
+    })
+    nr <- ceiling(length(pids) / 2)
+    sp <- subplot(panels, nrows = nr, shareX = FALSE, shareY = FALSE, titleX = TRUE, titleY = TRUE,
+                  margin = c(0.05, 0.03, 0.1, 0.07))
+    labs <- phos$meta$site_label[match(pids, phos$meta$pid)]
+    ann <- lapply(seq_along(pids), function(i) {
+      sfx <- if (i == 1) "" else i
+      list(text = paste0("<b>", labs[i], "</b>"), xref = paste0("x", sfx, " domain"),
+           yref = paste0("y", sfx, " domain"), x = 0, y = 1.03, xanchor = "left", yanchor = "bottom",
+           showarrow = FALSE, font = list(size = 11, color = INK, family = "ui-monospace, Menlo, monospace"))
+    })
+    sp |> finish_plot(paste0(ph_protein(), "_phosphosites"), annotations = ann,
+                      legend = list(orientation = "h", x = 0, y = 1 + 0.14 / nr, yanchor = "bottom"),
+                      margin = list(t = 80, r = 20, b = 50, l = 60))
+  })
+
+  ph_heat_matrix <- reactive({
+    d <- ph_long_all()
+    s <- ph_summary(d)
+    m <- ph_meta()
+    cols <- expand.grid(hpi = HPI, sample = SAMPLES, stringsAsFactors = FALSE)
+    M <- matrix(NA_real_, nrow(m), nrow(cols), dimnames = list(m$site_label, paste(cols$sample, cols$hpi)))
+    idx <- cbind(match(s$pid, m$pid), match(paste(s$sample, s$hpi), colnames(M)))
+    M[idx] <- s$mean
+    if (isTRUE(input$ph_rowz)) { M <- t(scale(t(M))); M[!is.finite(M)] <- NA }
+    list(M = M, cols = cols)
+  })
+
+  output$ph_heat_ui <- renderUI({
+    plotlyOutput("ph_heat", height = paste0(max(320, 140 + 20 * nrow(ph_meta())), "px"))
+  })
+  output$ph_heat <- renderPlotly({
+    h <- ph_heat_matrix(); M <- h$M; cols <- h$cols
+    z_mode <- isTRUE(input$ph_rowz)
+    lab <- if (z_mode) "Row z-score" else if (input$ph_scale == "log") "log₂ abundance" else "Abundance"
+    hover <- matrix(sprintf("<b>%s</b><br>%s, %s hpi<br>%s: %s", rep(rownames(M), ncol(M)),
+                            rep(cols$sample, each = nrow(M)), rep(cols$hpi, each = nrow(M)),
+                            lab, signif(as.vector(M), 4)), nrow = nrow(M))
+    lim <- if (z_mode) max(abs(M), na.rm = TRUE) else NULL
+    plot_ly(x = seq_len(ncol(M)), y = rownames(M), z = M, type = "heatmap", text = hover, hoverinfo = "text",
+            colorscale = colorscale(if (z_mode) DIV_RAMP else SEQ_RAMP),
+            zmin = if (z_mode) -lim else NULL, zmax = if (z_mode) lim else NULL, xgap = 1, ygap = 1,
+            colorbar = list(title = list(text = lab, side = "right"), thickness = 12, len = 0.6)) |>
+      finish_plot(paste0(ph_protein(), "_phospho_heatmap"), legend = FALSE,
+                  shapes = list(list(type = "line", x0 = 6.5, x1 = 6.5, y0 = 0, y1 = 1, yref = "paper",
+                                     line = list(color = INK, width = 1.5))),
+                  annotations = list(
+                    list(text = "<b>Guy11</b>", x = 3.5, y = 1.01, yref = "paper", yanchor = "bottom", showarrow = FALSE),
+                    list(text = "<b>Δpmk1</b>", x = 9.5, y = 1.01, yref = "paper", yanchor = "bottom", showarrow = FALSE)),
+                  xaxis = ax("Hours post inoculation", tickvals = seq_len(ncol(M)), ticktext = cols$hpi,
+                             showgrid = FALSE, showline = FALSE),
+                  yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE,
+                             tickfont = list(size = 10.5, color = INK, family = "ui-monospace, Menlo, monospace")),
+                  margin = list(t = 40, r = 10, b = 50, l = 10))
+  })
+
+  ph_fc_matrix <- reactive({
+    st <- ph_stats(); m <- ph_meta()
+    FC <- matrix(NA_real_, nrow(m), length(HPI), dimnames = list(m$site_label, HPI))
+    P <- FC
+    idx <- cbind(match(st$pid, m$pid), match(st$hpi, HPI))
+    FC[idx] <- st$log2FC; P[idx] <- st$p_adj
+    list(FC = FC, P = P, raw_p = { R <- FC; R[idx] <- st$p_value; R })
+  })
+
+  output$ph_fc_ui <- renderUI({
+    plotlyOutput("ph_fc", height = paste0(max(320, 150 + 20 * nrow(ph_meta())), "px"))
+  })
+  output$ph_fc <- renderPlotly({
+    f <- ph_fc_matrix(); FC <- f$FC
+    lim <- max(1, max(abs(FC), na.rm = TRUE))
+    hover <- matrix(sprintf("<b>%s</b><br>%s hpi<br>log₂FC (Δpmk1 / Guy11): %s<br>p = %s, adj. p = %s",
+                            rep(rownames(FC), ncol(FC)), rep(HPI, each = nrow(FC)), round(as.vector(FC), 2),
+                            signif(as.vector(f$raw_p), 2), signif(as.vector(f$P), 2)), nrow = nrow(FC))
+    sig <- which(!is.na(f$P) & f$P < 0.05, arr.ind = TRUE)
+    p <- plot_ly() |>
+      add_trace(x = seq_along(HPI), y = rownames(FC), z = FC, type = "heatmap", text = hover, hoverinfo = "text",
+                colorscale = colorscale(DIV_RAMP), zmin = -lim, zmax = lim, xgap = 2, ygap = 2,
+                colorbar = list(title = list(text = "log₂FC", side = "right"), thickness = 12, len = 0.6))
+    if (nrow(sig)) {
+      p <- p |> add_trace(x = sig[, 2], y = rownames(FC)[sig[, 1]], type = "scatter", mode = "markers", inherit = FALSE,
+                          marker = list(symbol = "circle", size = 7, color = INK, line = list(color = SURFACE, width = 1)),
+                          name = "adj. p < 0.05", hoverinfo = "skip", showlegend = TRUE)
+    }
+    p |> finish_plot(paste0(ph_protein(), "_phospho_log2FC"), legend = nrow(sig) > 0,
+                     xaxis = ax("Hours post inoculation", tickvals = seq_along(HPI), ticktext = HPI,
+                                showgrid = FALSE, showline = FALSE),
+                     yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE, type = "category",
+                                tickfont = list(size = 10.5, color = INK, family = "ui-monospace, Menlo, monospace")),
+                     annotations = list(list(text = "Blue: lower in Δpmk1   Red: higher in Δpmk1   Dot: adj. p < 0.05",
+                                             xref = "paper", yref = "paper", x = 0, y = 1.01, yanchor = "bottom",
+                                             xanchor = "left", showarrow = FALSE, font = list(size = 11, color = INK2))),
+                     margin = list(t = 50, r = 10, b = 50, l = 10))
+  })
+
+  ph_map_data <- reactive({
+    st <- ph_stats(); m <- ph_meta()
+    tsel <- input$ph_map_time %||% "max"
+    pick <- do.call(rbind, lapply(split(st, st$pid), function(x) {
+      x <- x[!is.na(x$log2FC), ]
+      if (!nrow(x)) return(NULL)
+      r <- if (tsel == "max") x[which.max(abs(x$log2FC)), ] else x[x$hpi == as.numeric(tsel), ]
+      if (!nrow(r)) NULL else r
+    }))
+    if (is.null(pick)) return(NULL)
+    pos <- site_positions(m$sites[match(pick$pid, m$pid)])
+    out <- do.call(rbind, lapply(seq_len(nrow(pick)), function(i)
+      if (nrow(pos[[i]])) cbind(pick[rep(i, nrow(pos[[i]])), ], pos[[i]]) else NULL))
+    out
+  })
+
+  output$ph_map <- renderPlotly({
+    g <- ph_protein()
+    len <- genes[g, "length_aa"]
+    d <- ph_map_data()
+    if (is.null(d) || !nrow(d)) return(empty_plot("No localised phosphosites with fold-change estimates"))
+    if (is.na(len)) len <- max(d$pos) + 20
+    d$class <- ifelse(!is.na(d$p_adj) & d$p_adj < 0.05, ifelse(d$log2FC > 0, "up", "down"), "ns")
+    ccol <- c(up = DIV_RAMP[6], down = DIV_RAMP[2], ns = "#a9a8a2")
+    clab <- c(up = "Higher in Δpmk1 (adj. p < 0.05)", down = "Lower in Δpmk1 (adj. p < 0.05)", ns = "Not significant")
+    pf <- parse_pfam(genes[g, "pfam"])
+    shapes <- list(list(type = "rect", x0 = 1, x1 = len, y0 = -0.12, y1 = 0.12, yref = "y",
+                        fillcolor = "#e4e4e0", line = list(width = 0), layer = "below"))
+    if (!is.null(pf)) for (i in seq_len(nrow(pf)))
+      shapes[[length(shapes) + 1]] <- list(type = "rect", x0 = pf$start[i], x1 = pf$end[i], y0 = -0.22, y1 = 0.22,
+                                           fillcolor = "#bfe6d3", line = list(color = BRAND, width = 1), layer = "below")
+    ylim <- max(1.5, max(abs(d$log2FC), na.rm = TRUE) * 1.15)
+    p <- plot_ly() |>
+      add_segments(x = d$pos, xend = d$pos, y = 0, yend = d$log2FC, showlegend = FALSE, hoverinfo = "skip",
+                   line = list(color = "#b5b4ad", width = 1.2))
+    for (cl in c("up", "down", "ns")) {
+      dd <- d[d$class == cl, ]
+      if (!nrow(dd)) next
+      p <- p |> add_trace(x = dd$pos, y = dd$log2FC, type = "scatter", mode = "markers", name = clab[[cl]],
+                          marker = list(color = ccol[[cl]], size = 10, line = list(color = SURFACE, width = 1.5)),
+                          text = sprintf("<b>p%s%d</b><br>%s<br>%s hpi: log₂FC %s<br>adj. p = %s",
+                                         dd$residue, dd$pos, dd$peptide, dd$hpi, round(dd$log2FC, 2), signif(dd$p_adj, 2)),
+                          hovertemplate = "%{text}<extra></extra>")
+    }
+    if (!is.null(pf)) {
+      p <- p |> add_trace(x = (pf$start + pf$end) / 2, y = rep(0, nrow(pf)), type = "scatter", mode = "markers",
+                          marker = list(size = 14, opacity = 0), showlegend = FALSE, hoverinfo = "text",
+                          text = sprintf("<b>%s</b> (%s)<br>%d-%d aa", pf$name, pf$pfam, pf$start, pf$end))
+    }
+    p |> finish_plot(paste0(g, "_phosphosite_map"), shapes = shapes,
+                     xaxis = ax(paste0("Residue (", g, ", ", len, " aa)"), range = c(0, len * 1.02), showgrid = FALSE),
+                     yaxis = ax("log₂FC (Δpmk1 / Guy11)", range = c(-ylim, ylim), zeroline = TRUE,
+                                zerolinecolor = AXIS),
+                     margin = list(t = 50, r = 20, b = 50, l = 60))
+  })
+
+  output$ph_table <- renderReactable({
+    st <- ph_stats()
+    st$pid <- NULL
+    reactable(st, compact = TRUE, highlight = TRUE, searchable = TRUE, defaultPageSize = 18, filterable = TRUE,
+              defaultSorted = list(p_value = "asc"),
+              columns = list(
+                site = colDef(name = "Site / peptide", minWidth = 200,
+                              style = list(fontFamily = "ui-monospace, Menlo, monospace", fontSize = "0.78rem")),
+                peptide = colDef(name = "Peptide", minWidth = 200,
+                                 style = list(fontFamily = "ui-monospace, Menlo, monospace", fontSize = "0.78rem")),
+                hpi = colDef(name = "hpi", maxWidth = 60),
+                n_guy11 = colDef(name = "n Guy11", maxWidth = 75), n_pmk1 = colDef(name = "n Δpmk1", maxWidth = 80),
+                mean_log2_guy11 = colDef(name = "log₂ Guy11", format = colFormat(digits = 2)),
+                mean_log2_pmk1 = colDef(name = "log₂ Δpmk1", format = colFormat(digits = 2)),
+                log2FC = colDef(name = "log₂FC", format = colFormat(digits = 2),
+                                style = function(v) if (!is.na(v) && abs(v) >= 1) list(fontWeight = 700) else NULL),
+                p_value = colDef(name = "p", cell = function(v) if (is.na(v)) "" else formatC(v, format = "g", digits = 2)),
+                p_adj = colDef(name = "adj. p", cell = function(v) if (is.na(v)) "" else formatC(v, format = "g", digits = 2))
+              ))
+  })
+
+  output$ph_dl_data <- downloadHandler(
+    filename = function() paste0("MagnaGenes_phospho_", ph_protein(), "_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) { d <- ph_long_all(); d$pid <- NULL; d$protein <- ph_protein(); write_tsv(d, file) })
+  output$ph_dl_stats <- downloadHandler(
+    filename = function() paste0("MagnaGenes_phospho_stats_", ph_protein(), "_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) { d <- ph_stats(); d$pid <- NULL; d$protein <- ph_protein(); write_tsv(d, file) })
+  output$ph_dl_fasta <- downloadHandler(
+    filename = function() paste0(ph_protein(), "_protein.fasta"),
+    content = function(file) writeLines(fasta_text(ph_protein(), "protein", TRUE), file))
+
+  ph_gg <- function() {
+    view <- input$ph_view %||% "profiles"
+    samp_lab <- c("Guy11", expression(Delta * italic(pmk1)))
+    if (view %in% c("profiles", "table")) {
+      pids <- ph_selected()
+      d <- ph_long_all(); d <- d[d$pid %in% pids, ]
+      s <- ph_summary(d)
+      d$value <- ph_value(d$abundance)
+      lv <- phos$meta$site_label[match(pids, phos$meta$pid)]
+      d$site <- factor(pdf_safe(d$site), pdf_safe(lv))
+      s$site <- factor(pdf_safe(s$site), pdf_safe(lv))
+      ggplot(s, aes(hpi, mean, colour = sample)) +
+        geom_point(data = d, aes(hpi, value, colour = sample), alpha = 0.5, size = 1.2,
+                   position = position_dodge(width = 0.25), inherit.aes = FALSE) +
+        geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.15, linewidth = 0.4,
+                      position = position_dodge(width = 0.25)) +
+        geom_line(linewidth = 0.6, position = position_dodge(width = 0.25)) +
+        geom_point(size = 1.8, position = position_dodge(width = 0.25)) +
+        facet_wrap(~site, scales = "free_y") +
+        scale_colour_manual(values = unname(COL_SAMPLE), breaks = SAMPLES, labels = samp_lab, name = NULL) +
+        scale_x_continuous(breaks = HPI) +
+        labs(x = "Hours post inoculation", y = if (input$ph_scale == "log") "log2 abundance" else "Abundance",
+             title = paste(ph_protein(), first_name[[ph_protein()]] %||% "")) +
+        theme_mg() + theme(strip.text = element_text(family = "mono", size = 7))
+    } else if (view == "heatmap") {
+      h <- ph_heat_matrix(); M <- h$M
+      d <- data.frame(site = factor(pdf_safe(rep(rownames(M), ncol(M))), rev(pdf_safe(rownames(M)))),
+                      sample = factor(rep(h$cols$sample, each = nrow(M)), SAMPLES,
+                                      labels = c("Guy11", "delta-pmk1")),
+                      hpi = factor(rep(h$cols$hpi, each = nrow(M)), HPI), value = as.vector(M))
+      z <- isTRUE(input$ph_rowz); lim <- max(abs(d$value), na.rm = TRUE)
+      ggplot(d, aes(hpi, site, fill = value)) + geom_tile(colour = SURFACE, linewidth = 0.3) +
+        facet_grid(~sample) +
+        (if (z) scale_fill_gradientn(colours = DIV_RAMP, limits = c(-lim, lim), name = "z-score", na.value = "#f4f4f2")
+         else scale_fill_gradientn(colours = SEQ_RAMP, name = "log2 abundance", na.value = "#f4f4f2")) +
+        labs(x = "Hours post inoculation", y = NULL, title = ph_protein()) + theme_mg() +
+        theme(panel.grid = element_blank(), legend.position = "right",
+              axis.text.y = element_text(family = "mono", size = 7))
+    } else if (view == "fc") {
+      f <- ph_fc_matrix()
+      d <- data.frame(site = factor(pdf_safe(rep(rownames(f$FC), ncol(f$FC))), rev(pdf_safe(rownames(f$FC)))),
+                      hpi = factor(rep(HPI, each = nrow(f$FC)), HPI),
+                      fc = as.vector(f$FC), sig = as.vector(!is.na(f$P) & f$P < 0.05))
+      lim <- max(1, max(abs(d$fc), na.rm = TRUE))
+      ggplot(d, aes(hpi, site, fill = fc)) + geom_tile(colour = SURFACE, linewidth = 0.5) +
+        geom_point(data = d[d$sig, ], size = 1.4, colour = INK) +
+        scale_fill_gradientn(colours = DIV_RAMP, limits = c(-lim, lim), name = "log2FC\n(delta-pmk1 / Guy11)",
+                             na.value = "#f4f4f2") +
+        labs(x = "Hours post inoculation", y = NULL, title = ph_protein(),
+             caption = "Dots: BH-adjusted p < 0.05 (Welch t-test)") +
+        theme_mg() + theme(panel.grid = element_blank(), legend.position = "right",
+                           axis.text.y = element_text(family = "mono", size = 7))
+    } else {
+      d <- ph_map_data(); g <- ph_protein(); len <- genes[g, "length_aa"]
+      validate(need(!is.null(d), "No sites to plot"))
+      if (is.na(len)) len <- max(d$pos) + 20
+      d$class <- ifelse(!is.na(d$p_adj) & d$p_adj < 0.05, ifelse(d$log2FC > 0, "Higher in delta-pmk1", "Lower in delta-pmk1"), "Not significant")
+      pf <- parse_pfam(genes[g, "pfam"])
+      ggplot(d) +
+        annotate("rect", xmin = 1, xmax = len, ymin = -0.1, ymax = 0.1, fill = "#e4e4e0") +
+        (if (!is.null(pf)) annotate("rect", xmin = pf$start, xmax = pf$end, ymin = -0.2, ymax = 0.2,
+                                    fill = "#bfe6d3", colour = BRAND)) +
+        geom_segment(aes(x = pos, xend = pos, y = 0, yend = log2FC), colour = "#b5b4ad") +
+        geom_point(aes(pos, log2FC, colour = class), size = 2.5) +
+        scale_colour_manual(values = c("Higher in delta-pmk1" = DIV_RAMP[6], "Lower in delta-pmk1" = DIV_RAMP[2],
+                                       "Not significant" = "#a9a8a2"), name = NULL) +
+        labs(x = paste0("Residue (", g, ", ", len, " aa)"), y = "log2FC (delta-pmk1 / Guy11)",
+             title = paste(g, "phosphosite map")) + theme_mg()
+    }
+  }
+  output$ph_dl_pdf <- pdf_download(ph_gg, function() paste0("MagnaGenes_phospho_", ph_protein(), "_", input$ph_view %||% "profiles"),
+                                   reactive(input$ph_pdf_w %||% 11), reactive(input$ph_pdf_h %||% 7))
+
+  # ===========================================================================
+  # PHYLOGENOMICS
+  # ===========================================================================
+  observeEvent(input$og_example, updateTextAreaInput(session, "og_genes", value = paste(EX_PHYLO, collapse = "\n")))
+
+  og_query <- eventReactive(input$og_go, {
+    p <- parse_gene_input(input$og_genes)
+    ids <- p$ids[p$ids %in% ortho$members$gene]
+    validate(need(length(ids) > 0, "None of the genes were found in the orthology data."))
+    ids <- head(ids, 40)
+    ogs <- ortho$members$og[match(ids, ortho$members$gene)]
+    sp <- ortho$species[order(ortho$species$tree_y), ]
+    M <- t(ortho$counts[ogs, sp$code, drop = FALSE])   # species x genes
+    colnames(M) <- ids
+    list(ids = ids, ogs = ogs, M = M, species = sp,
+         missing = c(p$missing, setdiff(p$ids, ortho$members$gene)))
+  }, ignoreNULL = FALSE)
+
+  output$og_summary <- renderUI({
+    q <- og_query()
+    other <- q$species$code != "MGG"
+    n_cons <- colSums(q$M[other, , drop = FALSE] > 0)
+    div(class = "summary-strip",
+      span(class = "chip ok", tags$b(length(q$ids)), "genes in", tags$b(length(unique(q$ogs))), "orthogroups"),
+      span(class = "chip", "Median", tags$b(stats::median(n_cons)), "of", sum(other), "species with orthologs"),
+      if (any(n_cons == 0)) span(class = "chip", tags$b(sum(n_cons == 0)), tags$em("M. oryzae"), "-specific"),
+      if (length(q$missing)) span(class = "chip warn", icon("triangle-exclamation"), tags$b(length(q$missing)),
+                                  "not found:", paste(head(q$missing, 6), collapse = ", ")))
+  })
+
+  tree_segments <- function(mode) {
+    tr <- ortho$tree
+    x <- if (mode == "phylo") tr$x_phylo else tr$x_clado
+    x <- x / max(x)
+    y <- tr$y; e <- tr$edge
+    hx <- as.vector(rbind(x[e[, 1]], x[e[, 2]], NA)); hy <- as.vector(rbind(y[e[, 2]], y[e[, 2]], NA))
+    parents <- unique(e[, 1])
+    vx <- as.vector(rbind(x[parents], x[parents], NA))
+    vy <- as.vector(rbind(vapply(parents, function(p) min(y[e[e[, 1] == p, 2]]), 0),
+                          vapply(parents, function(p) max(y[e[e[, 1] == p, 2]]), 0), NA))
+    tips <- seq_len(tr$n_tip)
+    list(x = c(hx, vx), y = c(hy, vy), tip_x = x[tips], tip_y = y[tips], tip_code = tr$tip_code)
+  }
+
+  output$og_plot_ui <- renderUI({
+    plotlyOutput("og_plot", height = "900px")
+  })
+  output$og_plot <- renderPlotly({
+    q <- og_query(); sp <- q$species; M <- q$M
+    tr <- tree_segments(input$og_tree_mode)
+    tip_name <- ortho$species$name[match(tr$tip_code, ortho$species$code)]
+    is_mo <- tr$tip_code == "MGG"
+    p_tree <- plot_ly() |>
+      add_trace(x = tr$x, y = tr$y, type = "scatter", mode = "lines", line = list(color = "#8a8984", width = 1.3),
+                hoverinfo = "skip", showlegend = FALSE) |>
+      add_trace(x = tr$tip_x + 0.02, y = tr$tip_y, type = "scatter", mode = "text",
+                text = ifelse(is_mo, paste0("<b><i>", tip_name, "</i></b>"), paste0("<i>", tip_name, "</i>")),
+                textposition = "middle right", textfont = list(size = 10.5, color = INK),
+                hoverinfo = "skip", showlegend = FALSE) |>
+      layout(xaxis = list(visible = FALSE, range = c(-0.02, 2.35), fixedrange = TRUE))
+
+    collab <- gene_short(colnames(M))
+    show_counts <- isTRUE(input$og_show_counts)
+    zmax <- max(3, stats::quantile(M[M > 0], 0.95, na.rm = TRUE))
+    hover <- matrix(sprintf("<i>%s</i><br>%s (%s)<br>%d ortholog(s)", rep(sp$name, ncol(M)),
+                            rep(collab, each = nrow(M)), rep(q$ogs, each = nrow(M)), as.vector(M)), nrow = nrow(M))
+    p_heat <- plot_ly(x = collab, y = sp$tree_y, z = M, type = "heatmap", text = hover, hoverinfo = "text",
+                      colorscale = colorscale(c("#f6f6f4", SEQ_RAMP[3:8])), zmin = 0, zmax = zmax,
+                      xgap = 2, ygap = 2, showscale = TRUE,
+                      colorbar = list(title = list(text = "Orthologs", side = "right"), thickness = 10, len = 0.35,
+                                      y = 1, yanchor = "top"))
+    if (show_counts) {
+      nz <- which(M > 0, arr.ind = TRUE)
+      p_heat <- p_heat |> add_trace(x = collab[nz[, 2]], y = sp$tree_y[nz[, 1]], type = "scatter", mode = "text",
+                                    inherit = FALSE,
+                                    text = M[nz], textfont = list(size = 9,
+                                    color = ifelse(M[nz] / zmax > 0.55, "#ffffff", INK)),
+                                    hoverinfo = "skip", showlegend = FALSE)
+    }
+    p_heat <- p_heat |> layout(xaxis = list(side = "top", tickangle = -50, tickfont = list(size = 10, color = INK),
+                                            showgrid = FALSE, type = "category",
+                                            categoryorder = "array", categoryarray = collab))
+    p_strip <- plot_ly()
+    for (ls in LIFESTYLES) {
+      k <- sp$lifestyle == ls
+      if (!any(k)) next
+      p_strip <- p_strip |> add_trace(x = rep("Lifestyle", sum(k)), y = sp$tree_y[k], type = "scatter", mode = "markers",
+                                      name = ls, legendgroup = "life",
+                                      marker = list(symbol = "square", size = 15, color = COL_LIFESTYLE[[ls]],
+                                                    line = list(color = SURFACE, width = 1)),
+                                      text = paste0("<i>", sp$name[k], "</i><br>", ls), hoverinfo = "text")
+    }
+    for (ap in names(COL_APPRESS)) {
+      k <- sp$appressorium == ap
+      if (!any(k)) next
+      p_strip <- p_strip |> add_trace(x = rep("Appressorium", sum(k)), y = sp$tree_y[k], type = "scatter",
+                                      mode = "markers", name = paste("Appressorium:", tolower(ap)), legendgroup = "app",
+                                      marker = list(symbol = "square", size = 15, color = COL_APPRESS[[ap]],
+                                                    line = list(color = SURFACE, width = 1)),
+                                      text = paste0("<i>", sp$name[k], "</i><br>Appressorium: ", ap), hoverinfo = "text")
+    }
+    p_strip <- p_strip |> layout(xaxis = list(side = "top", tickangle = -50, type = "category",
+                                              categoryorder = "array", categoryarray = c("Lifestyle", "Appressorium"),
+                                              range = c(-0.6, 1.6), tickfont = list(size = 10, color = INK),
+                                              showgrid = FALSE))
+    w_heat <- min(0.58, 0.05 + 0.04 * ncol(M))
+    subplot(p_tree, p_heat, p_strip, widths = c(0.92 - w_heat, w_heat, 0.08), shareY = TRUE,
+            margin = 0.004) |>
+      finish_plot("ortholog_profile",
+                  yaxis = list(visible = FALSE, range = c(0.4, nrow(sp) + 0.6), fixedrange = FALSE),
+                  legend = list(orientation = "h", x = 0, y = -0.02, yanchor = "top", font = list(size = 11)),
+                  margin = list(t = 110, r = 10, b = 70, l = 10))
+  })
+
+  og_life <- reactive({
+    q <- og_query(); sp <- q$species; M <- q$M
+    keep <- sp$code != "MGG"
+    groups <- c(LIFESTYLES[LIFESTYLES %in% sp$lifestyle[keep]], "All species")
+    F <- sapply(groups, function(g) {
+      k <- keep & (if (g == "All species") TRUE else sp$lifestyle == g)
+      colMeans(M[k, , drop = FALSE] > 0)
+    })
+    if (is.null(dim(F))) F <- matrix(F, nrow = 1, dimnames = list(colnames(M), groups))
+    n <- sapply(groups, function(g) sum(keep & (if (g == "All species") TRUE else sp$lifestyle == g)))
+    list(F = F, n = n)
+  })
+
+  output$og_life_ui <- renderUI(plotlyOutput("og_life", height = paste0(max(320, 140 + 22 * length(og_query()$ids)), "px")))
+  output$og_life <- renderPlotly({
+    l <- og_life(); F <- l$F
+    rl <- gene_short(rownames(F)); cl <- paste0(colnames(F), " (n=", l$n, ")")
+    hover <- matrix(sprintf("%s<br>%s<br>%s%% of species with an ortholog", rep(rl, ncol(F)), rep(cl, each = nrow(F)),
+                            round(100 * as.vector(F))), nrow = nrow(F))
+    plot_ly(x = cl, y = rl, z = F, type = "heatmap", zmin = 0, zmax = 1, text = hover, hoverinfo = "text",
+            colorscale = colorscale(SEQ_RAMP), xgap = 2, ygap = 2,
+            colorbar = list(title = list(text = "Share with ortholog", side = "right"), thickness = 12, len = 0.6,
+                            tickformat = ".0%")) |>
+      finish_plot("ortholog_lifestyle", legend = FALSE,
+                  xaxis = ax(NULL, side = "top", tickangle = -35, showgrid = FALSE, showline = FALSE),
+                  yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE),
+                  margin = list(t = 90, r = 10, b = 20, l = 10))
+  })
+
+  og_members_df <- reactive({
+    q <- og_query()
+    mem <- ortho$members[ortho$members$og %in% q$ogs, ]
+    mem <- mem[order(match(mem$og, q$ogs), mem$gene), ]
+    data.frame(orthogroup = mem$og, gene = mem$gene,
+               name = ifelse(is.na(first_name[mem$gene]), "", first_name[mem$gene]),
+               description = gene_desc(mem$gene),
+               in_query = mem$gene %in% q$ids, stringsAsFactors = FALSE)
+  })
+
+  output$og_members <- renderReactable({
+    d <- og_members_df()
+    d$links <- vapply(d$gene, function(g) if (g %in% genes$gene) xref_links_html(g) else "", "", USE.NAMES = FALSE)
+    rownames(d) <- NULL
+    reactable(d, groupBy = "orthogroup", compact = TRUE, highlight = TRUE, searchable = TRUE, defaultExpanded = TRUE,
+              defaultPageSize = 30,
+              columns = list(
+                orthogroup = colDef(name = "Orthogroup", minWidth = 120),
+                gene = colDef(name = "Gene", cell = function(v) tags$span(class = "gene-id", v)),
+                in_query = colDef(name = "In query", cell = function(v) if (isTRUE(v)) "✓" else "", maxWidth = 80, align = "center"),
+                description = colDef(minWidth = 240),
+                links = colDef(name = "Databases", html = TRUE, minWidth = 220, sortable = FALSE)))
+  })
+
+  og_counts_df <- reactive({
+    q <- og_query()
+    data.frame(species = q$species$name, code = q$species$code, lifestyle = q$species$lifestyle,
+               appressorium = q$species$appressorium, q$M[, , drop = FALSE], check.names = FALSE)[nrow(q$M):1, ]
+  })
+
+  output$og_table <- renderReactable({
+    d <- og_counts_df(); rownames(d) <- NULL
+    q <- og_query()
+    gcols <- setNames(lapply(q$ids, function(i) colDef(name = gene_short(i), align = "center", minWidth = 90,
+      style = function(v) if (v == 0) list(color = "#c9c8c2") else list(fontWeight = 600))), q$ids)
+    reactable(d, compact = TRUE, highlight = TRUE, pagination = FALSE, searchable = TRUE,
+              columns = c(list(species = colDef(name = "Species", minWidth = 220, style = list(fontStyle = "italic"),
+                                                sticky = "left"),
+                               code = colDef(show = FALSE)), gcols))
+  })
+
+  output$og_dl_counts <- downloadHandler(
+    filename = function() paste0("MagnaGenes_ortholog_counts_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) {
+      d <- og_counts_df(); q <- og_query()
+      hdr <- paste0("# orthogroups: ", paste(paste0(q$ids, "=", q$ogs), collapse = ", "))
+      writeLines(hdr, file)
+      suppressWarnings(utils::write.table(d, file, sep = "\t", quote = FALSE, row.names = FALSE, append = TRUE))
+    })
+  output$og_dl_members <- downloadHandler(
+    filename = function() paste0("MagnaGenes_orthogroup_members_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) write_tsv(og_members_df(), file))
+  output$og_dl_fasta <- downloadHandler(
+    filename = function() paste0("MagnaGenes_orthogroup_members_protein_", format(Sys.Date(), "%Y%m%d"), ".fasta"),
+    content = function(file) writeLines(fasta_text(og_members_df()$gene, "protein"), file))
+
+  og_gg <- function() {
+    view <- input$og_view %||% "profile"
+    q <- og_query(); M <- q$M; sp <- q$species
+    if (view == "lifestyle") {
+      l <- og_life(); F <- l$F
+      d <- data.frame(gene = factor(rep(gene_short(rownames(F)), ncol(F)), rev(gene_short(rownames(F)))),
+                      group = factor(rep(paste0(colnames(F), "\n(n=", l$n, ")"), each = nrow(F)),
+                                     paste0(colnames(F), "\n(n=", l$n, ")")),
+                      f = as.vector(F))
+      return(ggplot(d, aes(group, gene, fill = f)) + geom_tile(colour = SURFACE, linewidth = 0.6) +
+               scale_fill_gradientn(colours = SEQ_RAMP, limits = c(0, 1), labels = function(x) paste0(round(100 * x), "%"),
+                                    name = "Share with\northolog") +
+               labs(x = NULL, y = NULL) + theme_mg() +
+               theme(panel.grid = element_blank(), legend.position = "right"))
+    }
+    tr <- tree_segments(input$og_tree_mode)
+    T_W <- 4; L_W <- 6.5; n <- ncol(M)
+    seg <- data.frame(x = tr$x * T_W - (T_W + L_W), y = tr$y)
+    tips <- data.frame(x = tr$tip_x * T_W - (T_W + L_W) + 0.1, y = tr$tip_y,
+                       name = ortho$species$name[match(tr$tip_code, ortho$species$code)])
+    cells <- data.frame(x = rep(seq_len(n), each = nrow(M)), y = rep(sp$tree_y, n), count = as.vector(M))
+    strips <- rbind(data.frame(x = n + 1.2, y = sp$tree_y, fill = sp$lifestyle, kind = "Lifestyle"),
+                    data.frame(x = n + 2.2, y = sp$tree_y, fill = paste("Appressorium:", sp$appressorium), kind = "Appressorium"))
+    zmax <- max(3, stats::quantile(M[M > 0], 0.95, na.rm = TRUE))
+    fill_vals <- c(COL_LIFESTYLE, setNames(COL_APPRESS, paste("Appressorium:", names(COL_APPRESS))))
+    draw <- function() {
+      g <- ggplot() +
+        geom_path(data = seg, aes(x, y), colour = "#8a8984", linewidth = 0.35, na.rm = TRUE) +
+        geom_text(data = tips, aes(x, y, label = name), hjust = 0, size = 2.6, fontface = "italic", colour = INK) +
+        geom_tile(data = cells, aes(x, y, fill = pmin(count, zmax)), colour = SURFACE, linewidth = 0.4,
+                  width = 0.95, height = 0.95) +
+        scale_fill_gradientn(colours = c("#f6f6f4", SEQ_RAMP[3:8]), limits = c(0, zmax), name = "Orthologs") +
+        (if (isTRUE(input$og_show_counts)) geom_text(data = cells[cells$count > 0, ],
+                                                    aes(x, y, label = count), size = 2.2,
+                                                    colour = ifelse(cells$count[cells$count > 0] / zmax > 0.55, "white", INK))) +
+        annotate("text", x = seq_len(n), y = max(sp$tree_y) + 0.9, label = gene_short(colnames(M)),
+                 angle = 50, hjust = 0, size = 2.6, colour = INK) +
+        annotate("text", x = c(n + 1.2, n + 2.2), y = max(sp$tree_y) + 0.9, label = c("Lifestyle", "Appressorium"),
+                 angle = 50, hjust = 0, size = 2.6, colour = INK) +
+        geom_point(data = strips, aes(x, y, colour = fill), shape = 15, size = 3.2) +
+        scale_colour_manual(values = fill_vals, name = NULL) +
+        coord_cartesian(clip = "off", ylim = c(0.5, max(sp$tree_y) + 0.5)) +
+        theme_void(base_size = 9) +
+        theme(legend.position = "bottom", plot.margin = margin(60, 10, 10, 10),
+              legend.text = element_text(size = 7)) +
+        guides(colour = guide_legend(nrow = 3, override.aes = list(size = 3)))
+      print(g)
+    }
+    draw
+  }
+  output$og_dl_pdf <- pdf_download(og_gg, function() paste0("MagnaGenes_orthologs_", input$og_view %||% "profile"),
+                                   reactive(input$og_pdf_w %||% 12), reactive(input$og_pdf_h %||% 9))
+
+  # ===========================================================================
+  # GO ENRICHMENT
+  # ===========================================================================
+  observeEvent(input$go_example, {
+    updateTextAreaInput(session, "go_genes", value = paste(ex_go_genes(input$go_example_module), collapse = "\n"))
+  })
+
+  go_result <- eventReactive(input$go_run, {
+    p <- parse_gene_input(input$go_genes)
+    validate(need(length(p$ids) > 0, "Enter a gene list."))
+    bg <- if (identical(input$go_bg_mode, "custom")) {
+      b <- parse_gene_input(input$go_bg)$ids
+      validate(need(length(b) > 0, "The custom background is empty."))
+      b
+    } else NULL
+    r <- go_enrich(p$ids, input$go_ont, bg, input$go_min %||% 5, input$go_max %||% 500, input$go_adjust)
+    r$ids <- p$ids; r$missing <- p$missing; r$ont <- input$go_ont
+    r$cutoff <- input$go_cutoff %||% 0.05
+    r
+  }, ignoreNULL = FALSE)
+
+  go_sig <- reactive({
+    r <- go_result()
+    validate(need(!is.null(r$table) && nrow(r$table) > 0,
+                  "No genes from the list are annotated in this ontology/background."))
+    s <- r$table[r$table$p_adj <= r$cutoff, ]
+    validate(need(nrow(s) > 0, sprintf("No terms reach adjusted p ≤ %s. Try a different ontology, relax the cutoff, or check the results table.", r$cutoff)))
+    head(s, input$go_top)
+  })
+
+  output$go_summary <- renderUI({
+    r <- go_result()
+    n_sig <- if (!is.null(r$table)) sum(r$table$p_adj <= r$cutoff) else 0
+    div(class = "summary-strip",
+      span(class = "chip", tags$b(length(r$ids)), "genes in list"),
+      span(class = "chip ok", tags$b(r$n_query), "annotated in", ONT_NAMES[[r$ont]]),
+      span(class = "chip", "background", tags$b(format(r$n_universe, big.mark = ","))),
+      span(class = "chip", tags$b(format(r$n_tested, big.mark = ",")), "terms tested"),
+      span(class = if (n_sig) "chip ok" else "chip warn", tags$b(n_sig), "significant terms"),
+      if (length(r$missing)) span(class = "chip warn", tags$b(length(r$missing)), "IDs not recognised"))
+  })
+
+  go_term_label <- function(t, n = 60) ifelse(nchar(t) > n, paste0(substr(t, 1, n - 1), "…"), t)
+
+  go_height <- reactive(paste0(max(340, 120 + 24 * min(input$go_top, nrow(go_result()$table %||% data.frame()))), "px"))
+  output$go_dot_ui <- renderUI(plotlyOutput("go_dot", height = go_height()))
+  output$go_bar_ui <- renderUI(plotlyOutput("go_bar", height = go_height()))
+  output$go_matrix_ui <- renderUI(plotlyOutput("go_matrix", height = go_height()))
+
+  go_hover <- function(s) sprintf("<b>%s</b><br>%s<br>%d of %d genes (expected %s)<br>Fold enrichment %s<br>p = %s<br>adj. p = %s",
+                                  s$term, s$go_id, s$significant, s$annotated, s$expected, s$fold_enrichment,
+                                  signif(s$p_value, 3), signif(s$p_adj, 3))
+
+  output$go_dot <- renderPlotly({
+    s <- go_sig(); s$label <- go_term_label(s$term)
+    s$nlp <- -log10(pmax(s$p_adj, 1e-300))
+    lev <- rev(s$label)
+    plot_ly(s, x = ~fold_enrichment, y = ~label, type = "scatter", mode = "markers",
+            text = go_hover(s), hoverinfo = "text",
+            marker = list(size = ~significant, sizemode = "area", sizeref = 2 * max(s$significant) / 26^2, sizemin = 5,
+                          color = ~nlp, colorscale = colorscale(SEQ_RAMP[3:8]), showscale = TRUE,
+                          line = list(color = SURFACE, width = 1.5),
+                          colorbar = list(title = list(text = "−log₁₀ adj. p", side = "right"),
+                                          thickness = 12, len = 0.5))) |>
+      finish_plot(paste0("GO_", go_result()$ont, "_dotplot"), legend = FALSE,
+                  xaxis = ax("Fold enrichment", rangemode = "tozero"),
+                  yaxis = ax(NULL, categoryorder = "array", categoryarray = lev, showgrid = TRUE,
+                             tickfont = list(size = 11, color = INK)),
+                  annotations = list(list(text = "Marker area = genes in term", xref = "paper", yref = "paper",
+                                          x = 1, y = 1.01, xanchor = "right", yanchor = "bottom", showarrow = FALSE,
+                                          font = list(size = 11, color = INK2))),
+                  margin = list(t = 30, r = 10, b = 50, l = 10))
+  })
+
+  output$go_bar <- renderPlotly({
+    s <- go_sig(); s$label <- go_term_label(s$term)
+    s$nlp <- -log10(pmax(s$p_adj, 1e-300))
+    plot_ly(s, x = ~nlp, y = ~label, type = "bar", orientation = "h", text = go_hover(s), hoverinfo = "text",
+            textposition = "none", marker = list(color = SERIES[1])) |>
+      finish_plot(paste0("GO_", go_result()$ont, "_barchart"), legend = FALSE, bargap = 0.35,
+                  shapes = list(list(type = "line", x0 = -log10(go_result()$cutoff), x1 = -log10(go_result()$cutoff),
+                                     y0 = 0, y1 = 1, yref = "paper", line = list(color = INK2, width = 1))),
+                  xaxis = ax("−log₁₀ adjusted p-value", rangemode = "tozero"),
+                  yaxis = ax(NULL, categoryorder = "array", categoryarray = rev(s$label), showgrid = FALSE,
+                             tickfont = list(size = 11, color = INK)),
+                  margin = list(t = 20, r = 10, b = 50, l = 10))
+  })
+
+  go_matrix_data <- reactive({
+    s <- go_sig(); pr <- go_result()$pairs
+    pr <- pr[pr$go %in% s$go_id, ]
+    gl <- names(sort(table(pr$gene), decreasing = TRUE))
+    gl <- head(gl, 60)
+    M <- matrix(0, nrow(s), length(gl), dimnames = list(s$go_id, gl))
+    pr <- pr[pr$gene %in% gl, ]
+    M[cbind(match(pr$go, s$go_id), match(pr$gene, gl))] <- 1
+    list(M = M, s = s)
+  })
+
+  output$go_matrix <- renderPlotly({
+    md <- go_matrix_data(); M <- md$M; s <- md$s
+    tl <- go_term_label(s$term, 50); gl <- gene_short(colnames(M))
+    hover <- matrix(sprintf("%s<br>%s<br>%s", rep(tl, ncol(M)), rep(gl, each = nrow(M)),
+                            ifelse(as.vector(M) == 1, "annotated", "not annotated")), nrow = nrow(M))
+    plot_ly(x = gl, y = tl, z = M, type = "heatmap", zmin = 0, zmax = 1, text = hover, hoverinfo = "text",
+            colorscale = list(list(0, "#f4f4f2"), list(0.5, "#f4f4f2"), list(0.5, SERIES[1]), list(1, SERIES[1])),
+            showscale = FALSE, xgap = 2, ygap = 2) |>
+      finish_plot(paste0("GO_", go_result()$ont, "_gene_term_matrix"), legend = FALSE,
+                  xaxis = ax(NULL, side = "top", tickangle = -60, showgrid = FALSE, showline = FALSE,
+                             tickfont = list(size = 9.5, color = INK)),
+                  yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE,
+                             tickfont = list(size = 10.5, color = INK)),
+                  margin = list(t = 100, r = 10, b = 20, l = 10))
+  })
+
+  output$go_table <- renderReactable({
+    r <- go_result()
+    validate(need(!is.null(r$table) && nrow(r$table) > 0, "No results."))
+    d <- r$table
+    d$go_link <- sprintf('<a href="%s" target="_blank" rel="noopener">%s</a>', url_quickgo(d$go_id), d$go_id)
+    d <- d[, c("go_link", "term", "annotated", "significant", "expected", "fold_enrichment", "p_value", "p_adj", "genes")]
+    reactable(d, compact = TRUE, highlight = TRUE, searchable = TRUE, defaultPageSize = 20, filterable = FALSE,
+              rowStyle = function(i) if (d$p_adj[i] <= r$cutoff) list(background = "#f1faf5") else NULL,
+              columns = list(
+                go_link = colDef(name = "GO ID", html = TRUE, minWidth = 110),
+                term = colDef(name = "Term", minWidth = 260),
+                annotated = colDef(name = "Size", maxWidth = 70),
+                significant = colDef(name = "In list", maxWidth = 70),
+                expected = colDef(name = "Expected", maxWidth = 85),
+                fold_enrichment = colDef(name = "Fold", maxWidth = 70),
+                p_value = colDef(name = "p", cell = function(v) formatC(v, format = "g", digits = 2), maxWidth = 85),
+                p_adj = colDef(name = "adj. p", cell = function(v) formatC(v, format = "g", digits = 2), maxWidth = 85),
+                genes = colDef(name = "Genes", minWidth = 260, style = list(fontSize = "0.75rem", fontFamily = "ui-monospace, Menlo, monospace"))))
+  })
+
+  output$go_dl_table <- downloadHandler(
+    filename = function() paste0("MagnaGenes_GO_", go_result()$ont, "_enrichment_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) write_tsv(go_result()$table, file))
+  output$go_dl_pairs <- downloadHandler(
+    filename = function() paste0("MagnaGenes_GO_", go_result()$ont, "_gene_term_pairs_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
+    content = function(file) {
+      pr <- go_result()$pairs
+      pr$term <- go_terms$term[match(pr$go, go_terms$go)]
+      write_tsv(pr, file)
+    })
+
+  go_gg <- function() {
+    view <- input$go_view %||% "dot"
+    ont <- ONT_NAMES[[go_result()$ont]]
+    if (view == "matrix") {
+      md <- go_matrix_data(); M <- md$M
+      tl <- pdf_safe(go_term_label(md$s$term, 50))
+      d <- data.frame(term = factor(rep(tl, ncol(M)), rev(unique(tl))),
+                      gene = factor(rep(gene_short(colnames(M)), each = nrow(M)), gene_short(colnames(M))),
+                      v = factor(as.vector(M), c(0, 1)))
+      return(ggplot(d, aes(gene, term, fill = v)) + geom_tile(colour = SURFACE, linewidth = 0.5) +
+               scale_fill_manual(values = c("0" = "#f4f4f2", "1" = SERIES[1]), guide = "none") +
+               scale_x_discrete(position = "top") + labs(x = NULL, y = NULL, title = ont) + theme_mg() +
+               theme(axis.text.x = element_text(angle = 60, hjust = 0, size = 6), panel.grid = element_blank()))
+    }
+    s <- go_sig(); s$label <- factor(pdf_safe(go_term_label(s$term)), rev(unique(pdf_safe(go_term_label(s$term)))))
+    s$nlp <- -log10(pmax(s$p_adj, 1e-300))
+    if (view == "bar") {
+      ggplot(s, aes(nlp, label)) + geom_col(fill = SERIES[1], width = 0.65) +
+        geom_vline(xintercept = -log10(go_result()$cutoff), colour = INK2, linewidth = 0.3) +
+        labs(x = "-log10 adjusted p-value", y = NULL, title = ont) + theme_mg()
+    } else {
+      ggplot(s, aes(fold_enrichment, label)) +
+        geom_segment(aes(x = 0, xend = fold_enrichment, yend = label), colour = GRID, linewidth = 0.5) +
+        geom_point(aes(size = significant, colour = nlp)) +
+        scale_colour_gradientn(colours = SEQ_RAMP[3:8], name = "-log10 adj. p") +
+        scale_size_area(max_size = 7, name = "Genes") +
+        labs(x = "Fold enrichment", y = NULL, title = ont) + theme_mg() +
+        theme(legend.position = "right")
+    }
+  }
+  output$go_dl_pdf <- pdf_download(go_gg, function() paste0("MagnaGenes_GO_", go_result()$ont, "_", input$go_view %||% "dot"),
+                                   reactive(input$go_pdf_w %||% 10), reactive(input$go_pdf_h %||% 7))
+}
+
+shinyApp(ui, server)
