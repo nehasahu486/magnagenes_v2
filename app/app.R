@@ -22,6 +22,34 @@ if (FALSE) {
 
 APP_VERSION <- "2.0"
 V1_URL      <- "https://zenodo.org/records/4647766"   # MagnaGenes v1.0
+TSL_URL     <- "https://www.tsl.ac.uk/"
+
+# Version history shown on the About page. Add new releases at the top.
+VERSION_HISTORY <- list(
+  list(version = "2.0", date = "November 2026", current = TRUE,
+       notes = c("Redesigned interface with one integrated gene search (MGG IDs, gene names and keywords).",
+                 "Gene profiles with UniProt, AlphaFold DB, Ensembl Fungi, InterPro, Pfam and PubMed links, protein architecture and protein/CDS FASTA export.",
+                 "Transcriptomics heatmaps with clustering, z-scores and gene-gene correlation.",
+                 "Phosphoproteomics statistics (Guy11 vs \u0394pmk1), fold-change heatmaps and protein site maps.",
+                 "Ortholog profiles aligned to the species tree, with lifestyle and appressorium annotation.",
+                 "Built-in GO enrichment (Fisher's exact test) with dot plots and gene-term matrices.",
+                 "Runs fully in the browser with Shinylive; the AI chat module was removed.")),
+  list(version = "1.0", date = "March 2021", current = FALSE, url = V1_URL,
+       notes = c("First release of MagnaGenes by Andrew J. Foster and colleagues: an open science database of gene function studies in the blast fungus Magnaporthe oryzae."))
+)
+
+version_history_ui <- function(history = VERSION_HISTORY) {
+  tags$ol(class = "version-list",
+    lapply(history, function(v) {
+      tags$li(class = if (isTRUE(v$current)) "version-item current" else "version-item",
+        div(class = "version-head",
+            span(class = "version-tag", paste0("v", v$version)),
+            span(class = "version-date", v$date),
+            if (isTRUE(v$current)) span(class = "chip ok", "current"),
+            if (!is.null(v$url)) tags$a(href = v$url, target = "_blank", rel = "noopener", class = "xref", "Zenodo")),
+        tags$ul(lapply(v$notes, tags$li)))
+    }))
+}
 DATA_DIR    <- "data"
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
@@ -466,6 +494,14 @@ body { background: var(--page); color: var(--ink); }
 .infobox { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 1.2rem 1.3rem; }
 .infobox h4 { color: var(--brand-dark); font-size: 1.05rem; font-weight: 700; }
 .credit-box { border-left: 4px solid var(--brand); }
+.version-list { list-style: none; padding-left: 0; margin: 0; border-left: 2px solid var(--line); }
+.version-item { position: relative; padding: 0 0 1rem 1.2rem; }
+.version-item::before { content: ''; position: absolute; left: -7px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: #fff; border: 2px solid var(--muted); }
+.version-item.current::before { background: var(--brand); border-color: var(--brand); }
+.version-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .3rem; }
+.version-tag { font-weight: 700; color: var(--ink); font-size: 1.02rem; }
+.version-date { color: var(--muted); font-size: .85rem; }
+.version-item ul { margin: 0; padding-left: 1.1rem; font-size: .88rem; color: var(--ink-2); }
 
 /* ---- Results ---- */
 .summary-strip { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .8rem; align-items: center; }
@@ -562,10 +598,12 @@ home_panel <- nav_panel(
     ),
     div(class = "home-split",
       div(class = "infobox credit-box",
-        h4("Credits"),
-        p("MagnaGenes v2.0 is an extension of ",
-          tags$a("MagnaGenes v1.0", href = V1_URL, target = "_blank", rel = "noopener"),
-          " by Andrew Foster. It keeps the original datasets and design and adds a modern interface, more visualisations, FASTA export, cross-database links, and a serverless Shinylive build.")),
+        h4("Information"),
+        p("MagnaGenes is developed at the ",
+          tags$a("Talbot lab, The Sainsbury Laboratory", href = TSL_URL, target = "_blank", rel = "noopener"),
+          ", with the aim of providing a one-stop platform for rice blast research and promoting open science."),
+        p("We provide MagnaGenes to the community as part of the OpenRiceBlast and OpenWheatBlast initiatives. ",
+          "We aim to release regular updates to MagnaGenes and welcome additions or corrections from the blast research community to expand the database.")),
       div(class = "infobox",
         h4("Help us grow MagnaGenes"),
         p("Join our community of curators and help extend the MagnaGenes database. ",
@@ -801,11 +839,16 @@ about_panel <- nav_panel(
     div(class = "infobox credit-box mb-3",
       h4("Credits"),
       p(tags$strong("MagnaGenes v2.0"), " is an extension of MagnaGenes v1.0 by Andrew Foster, available at ",
-        tags$a("zenodo.org/records/4647766", href = V1_URL, target = "_blank", rel = "noopener"), "."),
+        tags$a("zenodo.org/records/4647766", href = V1_URL, target = "_blank", rel = "noopener"),
+        " (Foster AJ, Were VM, Yan X, Win J, Harant A, Langner T, Kamoun S, Talbot NJ; doi:10.5281/zenodo.4647766)."),
       p("Version 2.0 adds an integrated gene search, gene profiles with ",
         "cross-references to UniProt, AlphaFold DB, Ensembl Fungi and InterPro, protein and CDS FASTA export, clustered heatmaps, ",
         "correlation analysis, phosphosite statistics and site maps, a species-tree ortholog profile, and a lightweight ",
         "GO enrichment engine. It runs entirely in the browser with Shinylive (webR), so no data leave your computer.")
+    ),
+    div(class = "infobox mb-3",
+      h4("Version history"),
+      version_history_ui()
     ),
     div(class = "infobox mb-3",
       h4("Data sources"),
