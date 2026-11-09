@@ -11,7 +11,8 @@
 #   data-raw/source/annotation/fin_data.tsv
 #   data-raw/source/transcriptomics/*.tsv        (all files are combined)
 #   data-raw/source/phosphoproteomics/fin_phosmag.tsv
-#   data-raw/source/orthology/fin_ortho.tsv, Ladderrized_spstree.tre
+#   data-raw/source/orthology/fin_ortho.tsv (from build_fin_ortho.R),
+#     Species_Tree/SpeciesTree_rooted_node_labels.txt
 #   data-raw/source/gene_ontology/go_universe.tsv
 #   data-raw/metadata/rnaseq_experiments.csv     (labels, order, references)
 #
@@ -256,7 +257,11 @@ rownames(cmat) <- cm$OG_ID
 storage.mode(cmat) <- "integer"
 
 # Species tree: precomputed rectangular-layout coordinates (no ape needed in app)
-tree <- read.tree(file.path(raw_dir, "orthology", "Ladderrized_spstree.tre"))
+tree <- read.tree(file.path(raw_dir, "orthology", "Species_Tree", "SpeciesTree_rooted_node_labels.txt"))
+tree$node.label <- NULL
+tree <- drop.tip(tree, setdiff(tree$tip.label, species$code))   # only species in fin_ortho.tsv
+tree <- ladderize(tree, right = FALSE)
+tree <- read.tree(text = write.tree(tree))   # renumber nodes in ladderized order
 n_tip <- length(tree$tip.label)
 edge  <- tree$edge
 x_phylo <- node.depth.edgelength(tree)

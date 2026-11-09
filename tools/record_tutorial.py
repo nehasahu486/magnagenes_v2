@@ -137,7 +137,7 @@ def main():
         caption("Gene Search: type MGG IDs, gene names or keywords", 2)
         box = app.locator("#s_query")
         box.click()
-        box.press_sequentially("PMK1, MST12\nmelanin biosynthesis", delay=70)
+        box.press_sequentially("PMK1, MST12\nmelanin", delay=70)
         time.sleep(0.6)
         caption("IDs and names are matched exactly; other words are searched as keywords", 1)
         click(app.locator("#s_go"), wait=3)
@@ -167,7 +167,7 @@ def main():
         click(app.locator("#tx_heat_values"), wait=3)
         caption("Show the TPM values in the cells if needed", 3)
         subtab("tx_view", "corr", wait=3.5)
-        caption("Gene-gene correlation; the colour scale fits the genes you selected", 4)
+        caption("Gene-gene correlation per experiment; the colour scale fits the genes you selected", 4)
         subtab("tx_view", "table", wait=2)
         caption("Data table and TSV, PDF and FASTA downloads", 3)
 
@@ -193,7 +193,7 @@ def main():
         # ---- Phylogenomics --------------------------------------------------------
         tab("phylo")
         chapter("Phylogenomics")
-        caption("Phylogenomics: ortholog counts across 42 fungi", 1.5)
+        caption("Phylogenomics: ortholog counts across 50 fungi", 1.5)
         click(app.locator("#og_example"), wait=0.6)
         click(app.locator("#og_go"), wait=5)
         caption("Cells take the lifestyle colour, deeper with more copies; strips show lifestyle and appressorium", 4.5)

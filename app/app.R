@@ -33,9 +33,9 @@ VERSION_HISTORY <- list(
   list(version = "2.0", date = "November 2026", current = TRUE,
        notes = c("Redesigned interface with one search box for MGG IDs, gene names and keywords, a light/dark theme and a Reset button.",
                  "Gene profiles with UniProt, AlphaFold DB, Ensembl Fungi, InterPro, Pfam and PubMed links, a per-experiment expression heatmap, a labelled protein architecture diagram and protein/CDS FASTA export.",
-                 "Transcriptomics: TPM line plots sized to each experiment, with replicate error bars where available and an optional box plot; row z-score heatmaps with optional TPM labels; gene-gene correlation on a colour range fitted to the selected genes.",
+                 "Transcriptomics: TPM line plots sized to each experiment, with replicate error bars where available and an optional box plot; row z-score heatmaps with optional TPM labels; gene-gene correlation per experiment on a colour range fitted to the selected genes.",
                  "Phosphoproteomics: one replicate bar chart per phosphopeptide (Guy11 above \u0394pmk1), heatmaps, fold-change statistics and protein site maps with labelled sites and Pfam domains.",
-                 "Phylogenomics: ortholog counts on the species tree, in deeper shades of each lifestyle colour with more copies, with appressorium annotation.",
+                 "Phylogenomics: ortholog counts across 50 fungi (OrthoFinder) on the species tree, in deeper shades of each lifestyle colour with more copies, with appressorium annotation.",
                  "GO enrichment (Fisher's exact test) with dot/lollipop plots, bar charts, treemaps, significance-vs-enrichment plots and gene-term matrices, in a colour of your choice.",
                  "Video tutorial with chapters, opened from the Tutorial button.",
                  "Runs fully in the browser with Shinylive; the AI chat module was removed.")),
@@ -345,10 +345,12 @@ RAMP_SAMPLE <- list("Guy11" = c("#f1f9f3", "#c7e9cf", "#8fd0a1", "#4fae6c", "#1f
                     "Δpmk1" = c("#f6f6f6", "#d9d9d9", "#b0b0b0", "#7f7f7f", "#4f4f4f", "#222222"))
 
 # Phylogenomics: lifestyle colours from MagnaGenes v1.0 (ColorBrewer Pastel2,
-# alphabetical); cells are shaded from the pastel (1 copy) to deeper shades of
-# the same hue (more copies).
-LIFESTYLES <- c("Biotroph", "Commensal", "Endophyte", "Hemibiotroph", "Necrotroph", "Saprophyte", "Symbiont")
-COL_LIFESTYLE <- setNames(c("#B3E2CD", "#FDCDAC", "#CBD5E8", "#F4CAE4", "#E6F5C9", "#FFF2AE", "#F1E2CC"),
+# alphabetical), plus a light cyan for Nematophagous (new in the extended species
+# set; Pastel2's last colour is grey, which would read as "no data"). Cells are
+# shaded from the pastel (1 copy) to deeper shades of the same hue (more copies).
+LIFESTYLES <- c("Biotroph", "Commensal", "Endophyte", "Hemibiotroph", "Necrotroph", "Nematophagous",
+                "Saprophyte", "Symbiont")
+COL_LIFESTYLE <- setNames(c("#B3E2CD", "#FDCDAC", "#CBD5E8", "#F4CAE4", "#E6F5C9", "#A8DDEB", "#FFF2AE", "#F1E2CC"),
                           LIFESTYLES)
 # Same hue, rising chroma and falling lightness (HCL), so every shade reads as
 # the lifestyle colour rather than drifting towards brown or grey
@@ -712,7 +714,7 @@ home_panel <- nav_panel(
       feature_card("phospho", "atom", "Phosphoproteomics",
                    "Phosphosite abundance during appressorium development in Guy11 and Δpmk1, with fold-change heatmaps and protein site maps."),
       feature_card("phylo", "sitemap", "Phylogenomics",
-                   "Ortholog counts across 42 fungi on the species tree, annotated by lifestyle and appressorium type."),
+                   paste("Ortholog counts across", n_species, "fungi on the species tree, annotated by lifestyle and appressorium type.")),
       feature_card("go", "diagram-project", "GO Enrichment",
                    "Over-representation analysis (Fisher's exact test, BH correction) with dot plots and gene-term matrices.")
     ),
@@ -768,9 +770,10 @@ search_panel <- nav_panel(
     sidebar = sidebar(
       width = 330, title = "Query",
       textAreaInput("s_query", "Gene IDs, gene names or keywords", rows = 6, value = "",
-                    placeholder = "e.g.\nvirulence\nmelanin biosynthesis\nMGG_09565, PMK1, MST12"),
+                    placeholder = "e.g.\nmelanin\nmembrane\nMGG_09565, PMK1, MST12"),
       div(class = "section-note mb-2",
-          "One entry per line or comma-separated. Gene IDs and names are matched exactly; anything else is searched as a keyword (case-insensitive)."),
+          "One entry per line or comma-separated. Gene IDs and names are matched exactly; anything else is searched as a keyword (case-insensitive). ",
+          "Keywords are matched as written, not as natural language: use single words such as melanin or membrane."),
       example_link("s_example", "Example: pathogenicity signalling genes"),
       selectInput("s_field", "Search keywords in", choices = c(
         "All fields" = "all", "Gene name" = "gene_name", "Description" = "desc",
@@ -858,10 +861,11 @@ tx_panel <- nav_panel(
         uiOutput("tx_heat_ui")),
       nav_panel("Gene-gene correlation", value = "corr",
         div(class = "plot-note",
-            "How similar the expression patterns of each pair of genes are across the selected conditions. ",
+            "How similar the expression patterns of each pair of genes are, calculated separately within each experiment. ",
             "Each cell is the Pearson correlation coefficient (r) of log₂(TPM + 1) values: r = 1 means the two genes rise and fall together, ",
             "r = 0 means no linear relationship and r = −1 means opposite patterns. ",
-            "The colour scale spans only the range of r in the genes you selected (purple lowest, yellow highest), so small differences stay visible."),
+            "Genes are in the same order in every plot. The colour scale is shared and spans only the range of r in the genes you selected ",
+            "(purple lowest, yellow highest), so small differences stay visible. Experiments with fewer than three conditions are not shown."),
         uiOutput("tx_corr_ui")),
       nav_panel("Data table", value = "table", reactableOutput("tx_table"))
     )
@@ -947,10 +951,12 @@ og_panel <- nav_panel(
       id = "og_view",
       nav_panel("Ortholog profile", value = "profile",
         div(class = "plot-note",
-            "How many orthologs of each query gene are found in 42 fungal genomes. Species are arranged on the species tree (left). ",
+            "How many orthologs of each query gene are found in ", n_species, " fungal genomes. Species are arranged on the species tree (left). ",
             "Each column is one ", tags$em("M. oryzae"), " gene and its orthogroup; each cell is the number of genes from that species in the orthogroup. ",
             "Cells take the colour of the species' lifestyle, in deeper shades of that colour with more copies; empty cells mean no ortholog. ",
-            "The strips on the right show lifestyle and appressorium type (blank: no appressorium). Based on genome-wide orthogroup inference across the 42 proteomes and a species tree, both generated for MagnaGenes v2.0."),
+            "The strips on the right show lifestyle and appressorium type (blank: no appressorium). Based on OrthoFinder hierarchical orthogroups across the ", n_species, " proteomes, at the root of the species tree (rooted on ",
+            tags$em("Rhizophagus irregularis", .noWS = "after"), "), both generated for MagnaGenes v2.0. Large gene families, such as PTH11-like receptors or ",
+            "polyketide synthases, form one group, so their counts include paralogs."),
         uiOutput("og_plot_ui")),
       nav_panel("Conservation by lifestyle", value = "lifestyle",
         div(class = "plot-note", "Share of species in each lifestyle group with at least one ortholog (",
@@ -1052,7 +1058,7 @@ about_panel <- nav_panel(
         tags$li(tags$strong("Transcriptomics: "), "Mean TPM for Guy11 in planta (conidia to 144 hpi), Guy11 on hydrophobic and hydrophilic surfaces, ",
                 "Δpmk1 on a hydrophobic surface, and the Pmk1 analogue-sensitive mutant (active vs inhibited)."),
         tags$li(tags$strong("Phosphoproteomics: "), "Normalised phosphopeptide abundances for Guy11 and Δpmk1 at 0, 1, 1.5, 2, 4 and 6 hpi on a hydrophobic surface (three biological replicates)."),
-        tags$li(tags$strong("Orthology: "), "Orthogroups across 42 fungal species, with a species tree and lifestyle / appressorium annotation, generated for MagnaGenes v2.0 (not previously published)."),
+        tags$li(tags$strong("Orthology: "), "Hierarchical orthogroups (OrthoFinder 3, N0 level) across ", n_species, " fungal species, with the species tree rooted on Rhizophagus irregularis and lifestyle / appressorium annotation, generated for MagnaGenes v2.0 (not previously published)."),
         tags$li(tags$strong("Gene Ontology: "), "MagnaGenes GO annotation, with term names and the ontology graph from ", go_db$source, ".")
       )
     ),
@@ -1060,7 +1066,7 @@ about_panel <- nav_panel(
       h4("Methods"),
       tags$ul(
         tags$li("Heatmap clustering: average-linkage hierarchical clustering on Euclidean distances of the displayed values."),
-        tags$li("Gene-gene correlation: Pearson correlation of log₂(TPM + 1) across the selected conditions."),
+        tags$li("Gene-gene correlation: Pearson correlation of log₂(TPM + 1) across the conditions of each experiment, calculated separately per experiment (experiments with at least three conditions)."),
         tags$li("Phosphosite positions: peptide start in the master protein plus the modified residue's position in the peptide. Ambiguous localisations are listed as ambiguous."),
         tags$li("Phospho statistics: Welch t-test on log₂ abundance per time point, Benjamini-Hochberg correction within the protein."),
         tags$li("GO enrichment: one-sided Fisher's exact test on propagated annotations, BH or Bonferroni correction.")
@@ -1091,7 +1097,7 @@ ui <- page_navbar(
                      tags$style(app_css),
                      tags$meta(name = "description", content = "MagnaGenes v2.0: multi-omics explorer for Magnaporthe oryzae")),
   footer = div(class = "footer-note",
-               paste0("MagnaGenes v", APP_VERSION, ".")),
+               paste0("MagnaGenes v", APP_VERSION)),
   home_panel, search_panel, tx_panel, ph_panel, og_panel, go_panel,
   nav_spacer(),
   nav_item(actionLink("reset_app", tagList(icon("rotate-left"), "Reset"), class = "nav-link",
@@ -1724,46 +1730,84 @@ server <- function(input, output, session) {
     })
   })
 
+  # Gene-gene correlation, computed separately within each experiment (correlating
+  # across different experiments would mix study designs). Experiments with fewer
+  # than three conditions are skipped: with two points r is always +1 or -1.
+  CORR_MIN_SAMPLES <- 3
   tx_corr_data <- reactive({
     q <- tx_query()
     validate(need(length(q$ids) >= 2, "Correlation needs at least two genes."))
     l <- log2(q$m + 1)
-    cm <- suppressWarnings(stats::cor(t(l), use = "pairwise.complete.obs"))
-    ord <- if (isTRUE(input$tx_cluster) && nrow(cm) > 2) {
-      d <- 1 - cm; d[is.na(d)] <- 1
-      stats::hclust(stats::as.dist(d), "average")$order
-    } else seq_len(nrow(cm))
-    cm[ord, ord, drop = FALSE]
+    usable <- Filter(function(e) sum(q$cond$experiment == e) >= CORR_MIN_SAMPLES, q$exps)
+    cms <- lapply(setNames(usable, usable), function(e) {
+      suppressWarnings(stats::cor(t(l[, q$cond$experiment == e, drop = FALSE]),
+                                  use = "pairwise.complete.obs"))
+    })
+    # One gene order for every experiment, from the mean correlation, so rows line up
+    n <- length(q$ids)
+    ord <- seq_len(n)
+    if (isTRUE(input$tx_cluster) && n > 2 && length(cms)) {
+      avg <- Reduce(`+`, lapply(cms, function(m) { m[is.na(m)] <- 0; m })) / length(cms)
+      ord <- stats::hclust(stats::as.dist(1 - avg), "average")$order
+    }
+    list(cms = lapply(cms, function(m) m[ord, ord, drop = FALSE]),
+         skipped = setdiff(q$exps, usable))
   })
 
-  # Colour range of the correlation map: from the lowest r among the selected
+  # Colour range shared by all experiments: from the lowest r among the selected
   # genes (rounded down to 0.05) up to 1
-  corr_range <- function(cm) {
-    off <- cm[upper.tri(cm)]
+  corr_range <- function(cms) {
+    off <- unlist(lapply(cms, function(cm) cm[upper.tri(cm)]))
     lo <- suppressWarnings(min(off, na.rm = TRUE))
     if (!is.finite(lo)) return(c(-1, 1))
     lo <- max(-1, floor(lo * 20) / 20)
     if (lo > 0.95) lo <- 0.95
     c(lo, 1)
   }
+  tx_corr_size <- function(ids) {
+    cells <- min(820, max(300, 34 * length(ids)))
+    lab <- 20 + 8.5 * max(nchar(gene_short(ids)))
+    list(w = as.integer(cells + lab + 120), h = as.integer(cells + lab + 30))
+  }
 
   output$tx_corr_ui <- renderUI({
-    n <- length(tx_query()$ids)
-    plotlyOutput("tx_corr", height = paste0(min(1000, max(560, 260 + 38 * n)), "px"))
+    q <- tx_query()
+    cd <- tx_corr_data()
+    sz <- tx_corr_size(q$ids)
+    tagList(
+      div(class = "exp-grid", lapply(names(cd$cms), function(e) {
+        exp_frame(e, plotlyOutput(paste0("tx_corr_", exp_index(e)), width = paste0(sz$w, "px"),
+                                  height = paste0(sz$h, "px")),
+                  width = sz$w, note = sprintf("Pearson r across the %d conditions of this experiment.",
+                                               sum(q$cond$experiment == e)))
+      })),
+      if (length(cd$skipped))
+        div(class = "section-note mt-2",
+            "Not shown (fewer than ", CORR_MIN_SAMPLES, " conditions, so a correlation is not meaningful): ",
+            paste(EXP_SHORT[cd$skipped], collapse = ", "), "."))
   })
-  output$tx_corr <- renderPlotly({
-    plot_setup("tx_corr")
-    cm <- tx_corr_data(); lab <- gene_short(rownames(cm))
-    rng <- corr_range(cm)
-    hover <- matrix(sprintf("%s<br>%s<br>Pearson r = %s", rep(lab, ncol(cm)), rep(lab, each = nrow(cm)),
-                            round(as.vector(cm), 3)), nrow = nrow(cm))
-    plot_ly(x = lab, y = lab, z = cm, type = "heatmap", zmin = rng[1], zmax = rng[2], text = hover, hoverinfo = "text",
-            colorscale = colorscale(VIRIDIS), xgap = 2, ygap = 2,
-            colorbar = list(title = list(text = "Pearson r", side = "right"), thickness = 14, len = 0.6)) |>
-      finish_plot("expression_correlation", legend = FALSE,
-                  xaxis = ax(NULL, tickangle = -50, showgrid = FALSE, showline = FALSE),
-                  yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE),
-                  margin = list(t = 20, r = 10, b = 10, l = 10))
+  lapply(seq_len(nrow(EXP_INFO)), function(k) {
+    e <- EXP_INFO$experiment[k]
+    cid <- paste0("tx_corr_", k)
+    output[[cid]] <- renderPlotly({
+      plot_setup(cid, fixed = 15)
+      cd <- tx_corr_data(); req(e %in% names(cd$cms))
+      cm <- cd$cms[[e]]; lab <- gene_short(rownames(cm))
+      rng <- corr_range(cd$cms)
+      hover <- matrix(sprintf("%s<br>%s<br>Pearson r = %s", rep(lab, ncol(cm)), rep(lab, each = nrow(cm)),
+                              round(as.vector(cm), 3)), nrow = nrow(cm))
+      plot_ly(x = lab, y = lab, z = cm, type = "heatmap", zmin = rng[1], zmax = rng[2], text = hover,
+              hoverinfo = "text", colorscale = colorscale(VIRIDIS), xgap = 2, ygap = 2,
+              colorbar = list(title = list(text = "Pearson r", side = "right",
+                                           font = list(size = fsz(-1), color = INK2)),
+                              tickfont = list(size = fsz(-2), color = INK2), thickness = 14, len = 0.6)) |>
+        finish_plot(paste0("expression_correlation_", make.names(EXP_SHORT[[e]])), legend = FALSE,
+                    xaxis = ax(NULL, tickangle = -50, showgrid = FALSE, showline = FALSE,
+                               tickfont = list(size = fsz(-1), color = INK)),
+                    yaxis = ax(NULL, autorange = "reversed", showgrid = FALSE, showline = FALSE,
+                               scaleanchor = "x", tickfont = list(size = fsz(-1), color = INK)),
+                    margin = list(t = 10, r = 10, b = 10, l = 10))
+    })
   })
 
   output$tx_table <- renderReactable({
@@ -1849,12 +1893,20 @@ server <- function(input, output, session) {
         for (i in seq_along(plots)) print(plots[[i]], vp = grid::viewport(layout.pos.row = i, layout.pos.col = 1))
       }
     } else {
-      cm <- tx_corr_data(); lab <- gene_short(rownames(cm))
-      d <- data.frame(a = factor(rep(lab, ncol(cm)), lab), b = factor(rep(lab, each = nrow(cm)), rev(lab)),
-                      r = as.vector(cm))
+      cd <- tx_corr_data()
+      validate(need(length(cd$cms) > 0, "No selected experiment has enough conditions for a correlation."))
+      d <- do.call(rbind, lapply(names(cd$cms), function(e) {
+        cm <- cd$cms[[e]]; lab <- gene_short(rownames(cm))
+        data.frame(experiment = e, a = factor(rep(lab, ncol(cm)), lab),
+                   b = factor(rep(lab, each = nrow(cm)), rev(lab)), r = as.vector(cm))
+      }))
+      d$experiment <- factor(EXP_PARSE[d$experiment], EXP_PARSE[names(cd$cms)])
       ggplot(d, aes(a, b, fill = r)) + geom_tile(colour = "white", linewidth = 0.3) +
-        scale_fill_gradientn(colours = VIRIDIS, limits = corr_range(cm), oob = scales::squish, name = "Pearson r") +
-        labs(x = NULL, y = NULL, caption = "Pearson correlation of log2(TPM + 1) across the selected conditions") +
+        facet_wrap(~experiment, labeller = label_parsed) +
+        scale_fill_gradientn(colours = VIRIDIS, limits = corr_range(cd$cms), oob = scales::squish,
+                             name = "Pearson r", na.value = "#f2f2ef") +
+        labs(x = NULL, y = NULL,
+             caption = "Pearson correlation of log2(TPM + 1) across the conditions of each experiment") +
         coord_equal() + theme_mg() +
         theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank(),
               legend.position = "right")
@@ -2400,7 +2452,7 @@ server <- function(input, output, session) {
   }
 
   output$og_plot_ui <- renderUI({
-    plotlyOutput("og_plot", height = "1050px")
+    plotlyOutput("og_plot", height = paste0(250 + 19 * n_species, "px"))
   })
   output$og_plot <- renderPlotly({
     plot_setup("og_plot")
@@ -2415,7 +2467,7 @@ server <- function(input, output, session) {
                 text = ifelse(is_mo, paste0("<b><i>", tip_name, "</i></b>"), paste0("<i>", tip_name, "</i>")),
                 textposition = "middle right", textfont = list(size = fsz(-2), color = INK),
                 hoverinfo = "skip", showlegend = FALSE) |>
-      layout(xaxis = list(visible = FALSE, range = c(-0.02, 2.5), fixedrange = TRUE))
+      layout(xaxis = list(visible = FALSE, range = c(-0.02, 1.1 + 0.052 * max(nchar(tip_name))), fixedrange = TRUE))
 
     collab <- gene_short(colnames(M))
     show_counts <- isTRUE(input$og_show_counts)
@@ -2430,7 +2482,8 @@ server <- function(input, output, session) {
       ramp <- lifestyle_ramp(COL_LIFESTYLE[[ls]] %||% "#cccccc")
       step <- 1 / zmax
       cs <- c(list(list(0, EMPTY), list(step * 0.999, EMPTY)),
-              lapply(seq_along(ramp), function(i) list(step + (1 - step) * (i - 1) / (length(ramp) - 1), ramp[i])))
+              # seq() ends at exactly 1; plotly rejects a scale that stops at 0.9999...
+              Map(function(pos, col) list(pos, col), seq(step, 1, length.out = length(ramp)), ramp))
       p_heat <- p_heat |> add_trace(x = collab, y = sp$tree_y, z = Z, type = "heatmap", text = hover, hoverinfo = "text",
                                     colorscale = cs, zmin = 0, zmax = zmax, xgap = 2, ygap = 2, showscale = FALSE)
     }
@@ -2503,8 +2556,9 @@ server <- function(input, output, session) {
       base <- COL_LIFESTYLE[colnames(F)[j]]
       ramp <- if (is.na(base)) c("#f2f2f2", "#4f4f4f") else lifestyle_ramp(base)
       p <- p |> add_trace(x = cl, y = rl, z = Z, type = "heatmap", zmin = 0, zmax = 1, text = hover, hoverinfo = "text",
-                          colorscale = c(list(list(0, EMPTY)), lapply(seq_along(ramp), function(i)
-                            list(0.001 + 0.999 * (i - 1) / (length(ramp) - 1), ramp[i]))),
+                          colorscale = c(list(list(0, EMPTY)),
+                                         Map(function(pos, col) list(pos, col),
+                                             seq(0.001, 1, length.out = length(ramp)), ramp)),
                           xgap = 3, ygap = 3, showscale = FALSE)
     }
     p |> add_trace(x = rep(cl, each = nrow(F)), y = rep(rl, ncol(F)), type = "scatter", mode = "text", inherit = FALSE,

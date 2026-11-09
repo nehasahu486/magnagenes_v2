@@ -29,7 +29,7 @@ testServer(server, {
 
   outs <- c("s_summary", "s_table", "s_profile", "s_profile_expr", "s_profile_arch",
             "tx_summary", "tx_profiles_ui", "tx_heat_ui", paste0("tx_prof_", 1:5), paste0("tx_heat_", 1:5),
-            "tx_corr", "tx_table",
+            "tx_corr_ui", paste0("tx_corr_", 1:4), "tx_table",
             "ph_header", "ph_peptides_ui", "ph_profiles_ui",
             paste0("ph_prof_", head(app_env$phos$meta$pid[app_env$phos$meta$protein == "MGG_00800"], 2)),
             "ph_heat", "ph_fc", "ph_map", "ph_map_domains", "ph_table",
@@ -55,7 +55,7 @@ testServer(server, {
   }
 
   # Keyword search and alternative settings
-  session$setInputs(s_query = "melanin biosynthesis\nseptin, MGG_09565 PMK1", s_go = 1)
+  session$setInputs(s_query = "melanin\nseptin, MGG_09565 PMK1", s_go = 1)
   check("keyword search", stopifnot(nrow(s_result()$df) > 0))
   session$setInputs(tx_box = FALSE, tx_heat_values = FALSE, tx_go = 1)
   check("tx heatmap no labels", output$tx_heat_2)

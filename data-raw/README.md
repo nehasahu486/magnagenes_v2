@@ -13,14 +13,22 @@ Rscript data-raw/prepare_data.R
 ```
 data-raw/
   prepare_data.R                  builds app/data/*.rds
+  build_fin_ortho.R               builds source/orthology/fin_ortho.tsv from OrthoFinder output
   metadata/
     rnaseq_experiments.csv        RNA-seq experiments: label, sample order, paper link
   source/                         raw data (not in git: too large for GitHub)
     annotation/fin_data.tsv       gene annotation, long format (Gene, variable, value)
     transcriptomics/*.tsv         RNA-seq TPM, long format (Gene, sample, TPM, Experiment)
     phosphoproteomics/fin_phosmag.tsv
-    orthology/fin_ortho.tsv       orthogroup counts per species
-    orthology/Ladderrized_spstree.tre
+    orthology/                    OrthoFinder 3 results (50 species):
+      Phylogenetic_Hierarchical_Orthogroups/N0.tsv   hierarchical orthogroups (used)
+      Orthogroups/Orthogroups_UnassignedGenes.tsv    genes without orthologs
+      Species_Tree/SpeciesTree_rooted_node_labels.txt  species tree, rooted on Rhizophagus
+      SpeciesTree_rooted_Rhizophagus.txt             the rooted tree given to OrthoFinder (-s)
+    orthology/Lifestyle_extended.tsv  species name, lifestyle and appressorium type; only
+                                  species listed here are used (Candida albicans
+                                  "Candi_albic" was removed; the JGI genome Canalb1 is kept)
+    orthology/fin_ortho.tsv       orthogroup counts per species (built by build_fin_ortho.R)
     gene_ontology/go_universe.tsv gene to GO term mapping
     downloads/                    cached Ensembl FASTA (downloaded automatically)
 ```
@@ -68,11 +76,15 @@ check box, paper link and framed plot.
 
 - **Annotation:** add rows to `fin_data.tsv` (`Gene`, `variable`, `value`). New variables
   appear in downloads; to show one in the gene profile, add it in `app/app.R`.
-- **Phosphoproteomics, orthology, GO:** replace the file in its folder with the same columns
+- **Orthology:** replace the OrthoFinder result folders and `Lifestyle_extended.tsv` (every species
+  in the OrthoFinder run needs a row), then run `Rscript data-raw/build_fin_ortho.R` and
+  `Rscript data-raw/prepare_data.R`. A new lifestyle also needs a colour in `COL_LIFESTYLE`
+  in `app/app.R`.
+- **Phosphoproteomics, GO:** replace the file in its folder with the same columns
   and rerun the script.
 
 ## Keeping the raw data
 
-`source/` is listed in `.gitignore` because `fin_ortho.tsv` (233 MB) is larger than
+`source/` is listed in `.gitignore` because the orthology files (over 100 MB in total) is larger than
 GitHub's 100 MB file limit. Keep a copy of `source/` somewhere safe (lab storage, Zenodo,
 or Git LFS) so the data can be rebuilt.
