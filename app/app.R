@@ -26,6 +26,7 @@ TSL_URL     <- "https://www.tsl.ac.uk/"
 OPENRICEBLAST_URL  <- "http://openriceblast.org"
 OPENWHEATBLAST_URL <- "http://openwheatblast.net/"
 CONTACT_EMAIL      <- "neha.sahu.tsl@gmail.com"
+SITE_URL           <- "https://nehasahu486.github.io/magnagenes_v2/"
 
 # Version history shown on the About page. Add new releases at the top.
 VERSION_HISTORY <- list(
@@ -729,6 +730,12 @@ home_panel <- nav_panel(
                  style = "max-width: 100%; max-height: 300px;"),
         div(class = "section-note mt-2", "The ", tags$em("M. oryzae"), " infection cycle on rice."))
     ),
+    div(class = "infobox credit-box mb-3",
+      h4("Citation"),
+      p(class = "mb-0", "If you use MagnaGenes v.2.0 in your research, please cite: ",
+        "Sahu N. (2026) MagnaGenes v.2.0: an integrated multi-omics explorer for the rice blast fungus ",
+        tags$em("Magnaporthe oryzae", .noWS = "after"), ". ",
+        tags$a(SITE_URL, href = SITE_URL, target = "_blank", rel = "noopener"))),
     div(class = "home-split",
       div(class = "infobox credit-box",
         h4("Information"),
@@ -943,7 +950,7 @@ og_panel <- nav_panel(
             "How many orthologs of each query gene are found in 42 fungal genomes. Species are arranged on the species tree (left). ",
             "Each column is one ", tags$em("M. oryzae"), " gene and its orthogroup; each cell is the number of genes from that species in the orthogroup. ",
             "Cells take the colour of the species' lifestyle, in deeper shades of that colour with more copies; empty cells mean no ortholog. ",
-            "The strips on the right show lifestyle and appressorium type (blank: no appressorium). Based on genome-wide orthogroup inference across the 42 proteomes and the species tree from MagnaGenes v1.0."),
+            "The strips on the right show lifestyle and appressorium type (blank: no appressorium). Based on genome-wide orthogroup inference across the 42 proteomes and a species tree, both generated for MagnaGenes v2.0."),
         uiOutput("og_plot_ui")),
       nav_panel("Conservation by lifestyle", value = "lifestyle",
         div(class = "plot-note", "Share of species in each lifestyle group with at least one ortholog (",
@@ -1045,7 +1052,7 @@ about_panel <- nav_panel(
         tags$li(tags$strong("Transcriptomics: "), "Mean TPM for Guy11 in planta (conidia to 144 hpi), Guy11 on hydrophobic and hydrophilic surfaces, ",
                 "Δpmk1 on a hydrophobic surface, and the Pmk1 analogue-sensitive mutant (active vs inhibited)."),
         tags$li(tags$strong("Phosphoproteomics: "), "Normalised phosphopeptide abundances for Guy11 and Δpmk1 at 0, 1, 1.5, 2, 4 and 6 hpi on a hydrophobic surface (three biological replicates)."),
-        tags$li(tags$strong("Orthology: "), "Orthogroups across 42 fungal species, with a species tree and lifestyle / appressorium annotation."),
+        tags$li(tags$strong("Orthology: "), "Orthogroups across 42 fungal species, with a species tree and lifestyle / appressorium annotation, generated for MagnaGenes v2.0 (not previously published)."),
         tags$li(tags$strong("Gene Ontology: "), "MagnaGenes GO annotation, with term names and the ontology graph from ", go_db$source, ".")
       )
     ),
@@ -1084,7 +1091,7 @@ ui <- page_navbar(
                      tags$style(app_css),
                      tags$meta(name = "description", content = "MagnaGenes v2.0: multi-omics explorer for Magnaporthe oryzae")),
   footer = div(class = "footer-note",
-               paste0("MagnaGenes v", APP_VERSION, ". Runs entirely in your browser via Shinylive.")),
+               paste0("MagnaGenes v", APP_VERSION, ".")),
   home_panel, search_panel, tx_panel, ph_panel, og_panel, go_panel,
   nav_spacer(),
   nav_item(actionLink("reset_app", tagList(icon("rotate-left"), "Reset"), class = "nav-link",
