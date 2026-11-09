@@ -124,11 +124,11 @@ def main():
         # ---- Home -----------------------------------------------------------
         chapter("Welcome and home page")
         caption("MagnaGenes v2.0: a multi-omics explorer for <i>Magnaporthe oryzae</i>", 3.5)
-        caption("Runs entirely in your browser: no installation and no server", 3)
+        caption("Gene annotation, RNA-seq, phosphoproteomics, orthology and GO in one place", 3)
         scroll(520)
         caption("Each card opens a tool: gene search, transcriptomics, phosphoproteomics, phylogenomics and GO", 4)
-        scroll(1400)
-        caption("Information, contact details and how to contribute data", 3.5)
+        scroll(5000)   # bottom of the page: citation and information boxes
+        caption("How to cite MagnaGenes, information, contact details and how to contribute data", 4)
         scroll(0, 1)
 
         # ---- Gene search ----------------------------------------------------
@@ -167,7 +167,9 @@ def main():
         click(app.locator("#tx_heat_values"), wait=3)
         caption("Show the TPM values in the cells if needed", 3)
         subtab("tx_view", "corr", wait=3.5)
-        caption("Gene-gene correlation per experiment; the colour scale fits the genes you selected", 4)
+        caption("Gene-gene correlation, one plot per experiment; the colour scale fits the genes you selected", 4)
+        scroll(700, 2.5)
+        scroll(0, 0.8)
         subtab("tx_view", "table", wait=2)
         caption("Data table and TSV, PDF and FASTA downloads", 3)
 
