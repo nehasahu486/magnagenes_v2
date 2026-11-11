@@ -30,7 +30,11 @@ SITE_URL           <- "https://nehasahu486.github.io/magnagenes_v2/"
 
 # Version history shown on the About page. Add new releases at the top.
 VERSION_HISTORY <- list(
-  list(version = "2.0", date = "November 2026", current = TRUE,
+  list(version = "2.0.1", date = "11 Nov 2026", current = TRUE,
+       url = "https://github.com/nehasahu486/magna-mined", url_label = "Magna-Mined",
+       notes = c("Last automated curation was run on 11 Nov 2026 using Magna-Mined (2021-2026 Magnaporthe oryzae literature sweep: 110 newly classified genes, 151 baseline genes enriched with additional functions, and 184 genes with knockout phenotypes).",
+                 "Automated literature curation is planned to run every six months.")),
+  list(version = "2.0", date = "November 2026", current = FALSE,
        notes = c("Redesigned interface with one search box for MGG IDs, gene names and keywords, a light/dark theme and a Reset button.",
                  "Gene profiles with UniProt, AlphaFold DB, Ensembl Fungi, InterPro, Pfam and PubMed links, a per-experiment expression heatmap, a labelled protein architecture diagram and protein/CDS FASTA export.",
                  "Transcriptomics: TPM line plots sized to each experiment, with replicate error bars where available and an optional box plot; row z-score heatmaps with optional TPM labels; gene-gene correlation per experiment on a colour range fitted to the selected genes.",
@@ -51,7 +55,7 @@ version_history_ui <- function(history = VERSION_HISTORY) {
             span(class = "version-tag", paste0("v", v$version)),
             span(class = "version-date", v$date),
             if (isTRUE(v$current)) span(class = "chip ok", "current"),
-            if (!is.null(v$url)) tags$a(href = v$url, target = "_blank", rel = "noopener", class = "xref", "Zenodo")),
+            if (!is.null(v$url)) tags$a(href = v$url, target = "_blank", rel = "noopener", class = "xref", v$url_label %||% "Zenodo")),
         tags$ul(lapply(v$notes, tags$li)))
     }))
 }
@@ -738,6 +742,14 @@ home_panel <- nav_panel(
         "Sahu N. (2026) MagnaGenes v.2.0: an integrated multi-omics explorer for the rice blast fungus ",
         tags$em("Magnaporthe oryzae", .noWS = "after"), ". ",
         tags$a(SITE_URL, href = SITE_URL, target = "_blank", rel = "noopener"))),
+    div(class = "infobox mb-3",
+      h4("Curation"),
+      p(class = "mb-0", "MagnaGenes is curated automatically with newly published ", tags$em("Magnaporthe"),
+        " research using ",
+        tags$a("Magna-Mined", href = "https://github.com/nehasahu486/magna-mined",
+               target = "_blank", rel = "noopener", .noWS = "after"),
+        ". Automated curation is planned to run every six months, and the update history (last run: ",
+        tags$strong("11 Nov 2026"), ") is recorded in ", tags$strong("About > Version history"), ".")),
     div(class = "home-split",
       div(class = "infobox credit-box",
         h4("Information"),

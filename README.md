@@ -104,6 +104,10 @@ The gene-term matrix shows which genes drive each enriched term.
 
 ![GO gene-term matrix](docs/screenshots/11_go_matrix.png)
 
+## Curation
+
+MagnaGenes v2.0 is curated automatically with newly published *Magnaporthe* research using [**Magna-Mined**](https://github.com/nehasahu486/magna-mined), an automated literature mining and evidence-extraction pipeline. Automated literature curation is planned to run **every six months**, and the full curation and release record can be found in the **Version history** section under the **About** tab in the app (last curation: **11 Nov 2026**).
+
 ## Data sources
 
 1. **MagnaGenes v1.0**: Foster AJ, Were VM, Yan X, Win J, Harant A, Langner T, Kamoun S, Talbot NJ (2021). MagnaGenes: an open science database of gene function studies in the blast fungus *Magnaporthe oryzae*. Zenodo. [doi:10.5281/zenodo.4647766](https://zenodo.org/records/4647766). Curated gene annotation (BLAST2GO, InterPro, Pfam, KEGG, mutant phenotypes, effector predictions, literature) and GO annotation.

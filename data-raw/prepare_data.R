@@ -8,7 +8,7 @@
 #   Rscript data-raw/prepare_data.R
 #
 # Inputs (see data-raw/README.md for formats and how to add new data):
-#   data-raw/source/annotation/fin_data.tsv
+#   data-raw/source/annotation/fin_data*.tsv     (latest fin_data_YYYY-MM-DD.tsv; older archived)
 #   data-raw/source/transcriptomics/*.tsv        (all files are combined)
 #   data-raw/source/phosphoproteomics/fin_phosmag.tsv
 #   data-raw/source/orthology/fin_ortho.tsv (from build_fin_ortho.R),
@@ -102,7 +102,10 @@ canon <- tx[order(gene, !grepl("T0$", transcript))][, .SD[1], by = gene]
 # 2. Gene annotation table (one row per gene)
 # -----------------------------------------------------------------------------
 message("Annotations")
-ann <- fread(file.path(raw_dir, "annotation", "fin_data.tsv"), sep = "\t", quote = "", encoding = "UTF-8")
+source("data-raw/resolve_latest_fin_data.R")
+fin_data_path <- resolve_and_archive_fin_data(file.path(raw_dir, "annotation"))
+message("  using ", basename(fin_data_path))
+ann <- fread(fin_data_path, sep = "\t", quote = "", encoding = "UTF-8")
 ann[, value := trimws(value)]
 ann <- ann[value != "" & !is.na(value)]
 ann <- ann[, .(value = paste(unique(value), collapse = " | ")), by = .(Gene, variable)]
