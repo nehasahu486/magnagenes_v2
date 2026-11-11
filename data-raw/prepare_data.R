@@ -117,11 +117,22 @@ rename <- c(
   "Pfam" = "pfam", "KEGG.Pathway" = "kegg", "Mutant.Phenotype" = "phenotype",
   "Process.Affected" = "process", "PMID.or.link" = "reference",
   "Other.links.to.publication" = "other_reference",
+  "Additional.Functions" = "additional_functions", "Knockout.Reported" = "knockout_reported",
+  "Knockout.Phenotype" = "knockout_phenotype", "Other.Fungi.Notes" = "other_fungi_notes",
+  "Evidence.Quotes" = "evidence_quotes",
   "WGCNA.Co-Expression.Module.(Yan.et.al,.2023,.The.Plant.Cell)" = "wgcna_module",
   "AlphaFoldDB" = "alphafold_url", "Uniprot" = "uniprot_url", "Ensembl.Link" = "ensembl_url"
 )
 setnames(wide, names(rename)[names(rename) %in% names(wide)],
          rename[names(rename) %in% names(wide)])
+# Magna-Mined curation fields (older fin_data files may lack some of them).
+# Evidence quotes are one row each in fin_data, joined here with " | ".
+for (v in c("additional_functions", "knockout_reported", "knockout_phenotype",
+            "other_fungi_notes", "evidence_quotes"))
+  if (!v %in% names(wide)) wide[, (v) := NA_character_]
+# Quotes are copied from paper full text: drop inline HTML tags (<sup>, <i>, <br>)
+wide[, evidence_quotes := trimws(gsub("[[:space:]]+", " ",
+  gsub("</?[A-Za-z][A-Za-z0-9]*( [^<>]{0,60})?/?>", "", gsub("<br[[:space:]]*/?>", " ", evidence_quotes, ignore.case = TRUE))))]
 wide[, length_aa := as.integer(length_aa)]
 wide[, alphafold_acc := sub(".*/entry/", "", alphafold_url)]
 wide[!grepl("/entry/", alphafold_url), alphafold_acc := NA_character_]

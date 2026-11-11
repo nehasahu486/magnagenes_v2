@@ -261,6 +261,31 @@ xref_links_html <- function(g) {
   )
 }
 
+# All PubMed IDs cited for a gene (reference links, curated notes, quotes) as links
+refs_html <- function(...) {
+  txt <- paste(na.omit(c(...)), collapse = " ")
+  ids <- unique(c(regmatches(txt, gregexpr("(?<=pubmed\\.ncbi\\.nlm\\.nih\\.gov/)[0-9]+", txt, perl = TRUE))[[1]],
+                  regmatches(txt, gregexpr("(?<=PMID:)[0-9]+", txt, perl = TRUE))[[1]]))
+  other <- setdiff(regmatches(txt, gregexpr("https?://[^ |;]+", txt))[[1]],
+                   grep("pubmed\\.ncbi", regmatches(txt, gregexpr("https?://[^ |;]+", txt))[[1]], value = TRUE))
+  if (!length(ids) && !length(other)) return("")
+  a <- c(sprintf('<a href="https://pubmed.ncbi.nlm.nih.gov/%s/" target="_blank" rel="noopener">PMID %s</a>', ids, ids),
+         sprintf('<a href="%s" target="_blank" rel="noopener">link</a>', htmltools::htmlEscape(other, TRUE)))
+  if (length(a) <= 3) return(paste(a, collapse = ", "))
+  sprintf('%s <details class="cell-more"><summary>+%d more</summary>%s</details>',
+          paste(a[1:3], collapse = ", "), length(a) - 3, paste(a[-(1:3)], collapse = ", "))
+}
+
+# Long " | "-separated text (quotes, notes) as an expandable list in a table cell
+expandable_html <- function(x, noun, split = " \\| ") {
+  if (is.na(x) || !nzchar(x)) return("")
+  parts <- htmltools::htmlEscape(unique(trimws(strsplit(x, split)[[1]])))
+  parts <- gsub("PMID:([0-9]+)", '<a href="https://pubmed.ncbi.nlm.nih.gov/\\1/" target="_blank" rel="noopener">PMID:\\1</a>', parts)
+  sprintf('<details class="cell-more"><summary>%d %s%s</summary><ul>%s</ul></details>',
+          length(parts), noun, if (length(parts) == 1) "" else "s",
+          paste0("<li>", parts, "</li>", collapse = ""))
+}
+
 linkify <- function(x) {
   if (is.na(x) || !nzchar(x)) return(NULL)
   parts <- strsplit(x, " \\| ")[[1]]
@@ -501,6 +526,47 @@ pdf_size_inputs <- function(prefix, w = 10, h = 6) {
 
 section_note <- function(...) div(class = "section-note", ...)
 
+# Downloads on the static site: a plain click on a download link makes the
+# browser's download manager request the file from the web server (GitHub
+# Pages), which does not have it, so the browser reports "file wasn't
+# available". Instead, fetch the file from the page (this goes through the
+# Shinylive service worker to R in the browser) and save it from a blob URL.
+download_js <- "
+document.addEventListener('click', function (ev) {
+  var a = ev.target.closest && ev.target.closest('a.shiny-download-link');
+  if (!a) return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  var href = a.getAttribute('href');
+  if (!href || a.classList.contains('disabled')) return;
+  if (a.dataset.busy) return;
+  a.dataset.busy = '1';
+  fetch(new URL(href, document.baseURI).href, { cache: 'no-store' })
+    .then(function (r) {
+      if (!r.ok) return r.text().then(function (t) {
+        // Shiny wraps validate() messages in <p>; the service worker answers 404
+        var p = /<p>([\\s\\S]*?)<\\/p>/.exec(t);
+        throw new Error(p ? p[1] : (r.status === 404 ? 'reload' : 'HTTP ' + r.status));
+      });
+      var cd = r.headers.get('content-disposition') || '';
+      var m = /filename\\*=(?:UTF-8'')?([^;]+)/i.exec(cd) || /filename=\"?([^\";]+)\"?/i.exec(cd);
+      var name = m ? decodeURIComponent(m[1].trim()) : (a.id || 'download');
+      return r.blob().then(function (b) { return [b, name]; });
+    })
+    .then(function (res) {
+      var url = URL.createObjectURL(res[0]);
+      var tmp = document.createElement('a');
+      tmp.href = url; tmp.download = res[1]; tmp.style.display = 'none';
+      document.body.appendChild(tmp); tmp.click(); tmp.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    })
+    .catch(function (e) {
+      if (window.Shiny) Shiny.setInputValue('download_failed', e.message || String(e), { priority: 'event' });
+    })
+    .finally(function () { delete a.dataset.busy; });
+}, true);
+"
+
 # Tutorial pop-up: loads tutorial.mp4 and tutorial_chapters.json from the
 # published site folder (the page that hosts the Shinylive app), and builds the
 # chapter list with clickable timestamps.
@@ -659,6 +725,10 @@ textarea::placeholder, input::placeholder, .selectize-input input::placeholder {
 .facts dd { margin: 0; color: var(--ink); word-break: break-word; }
 .profile-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .6rem 0 .2rem; }
 .seq-block { font-family: var(--mono); font-size: .82rem; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: .8rem; max-height: 260px; overflow: auto; white-space: pre; color: var(--ink); }
+.cell-more { margin-top: .1rem; }
+.cell-more > summary { font-size: .85rem !important; font-weight: 600; }
+.cell-more ul { margin: .3rem 0 0; padding-left: 1.1rem; font-size: .85rem; }
+.cell-more li { margin-bottom: .35rem; }
 details > summary { cursor: pointer; color: var(--brand-dark); font-weight: 600; font-size: .95rem; }
 .method-box { font-size: .9rem; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: .7rem .9rem; margin-top: .6rem; }
 .footer-note { text-align: center; font-size: .82rem; color: var(--muted); padding: 1.2rem 0 1.6rem; }
@@ -796,6 +866,7 @@ search_panel <- nav_panel(
       checkboxInput("s_pheno", "Genes with a mutant phenotype only", FALSE),
       actionButton("s_go", "Search", icon = icon("magnifying-glass"), class = "btn-primary w-100"),
       div(class = "sidebar-heading mt-3", "Download results"),
+      div(class = "section-note mb-1", "Tick rows in the table to download only those genes; otherwise all results are included."),
       download_group(
         downloadButton("s_dl_tsv", "Annotations (TSV)", class = "btn-outline-primary btn-sm"),
         downloadButton("s_dl_pep", "Protein FASTA", class = "btn-outline-primary btn-sm"),
@@ -805,7 +876,7 @@ search_panel <- nav_panel(
     uiOutput("s_summary"),
     navset_card_underline(
       id = "s_view",
-      nav_panel("Results", value = "table", reactableOutput("s_table")),
+      nav_panel("Results", value = "table", uiOutput("s_tick_note"), reactableOutput("s_table")),
       nav_panel("Gene profile", value = "profile",
         div(class = "d-flex flex-wrap gap-2 align-items-end mb-2",
             div(style = "min-width: 280px;",
@@ -1107,6 +1178,7 @@ ui <- page_navbar(
   header = tags$head(htmltools::attachDependencies(
                        tags$span(), c(plot_ly()$dependencies, htmlwidgets::getDependency("plotly", "plotly"))),
                      tags$style(app_css),
+                     tags$script(HTML(download_js)),
                      tags$meta(name = "description", content = "MagnaGenes v2.0: multi-omics explorer for Magnaporthe oryzae")),
   footer = div(class = "footer-note",
                paste0("MagnaGenes v", APP_VERSION)),
@@ -1135,6 +1207,15 @@ server <- function(input, output, session) {
 
   # Reset: start a fresh session (packages stay loaded, so this is quick)
   observeEvent(input$reset_app, session$reload())
+
+  # Download failed (see download_js): either a validate() message from the
+  # handler (nothing to download yet), or the service worker lost the app
+  observeEvent(input$download_failed, {
+    msg <- input$download_failed
+    if (msg %in% c("reload", "") || grepl("^HTTP |Failed to fetch", msg))
+      msg <- "The download could not be prepared. Please reload the page and try again."
+    showNotification(msg, type = "warning", duration = 8)
+  })
 
   # Tutorial: video tour with clickable chapters. The video and its chapter list
   # sit next to the published site (see build_site.R), not in the app bundle, so
@@ -1234,9 +1315,9 @@ server <- function(input, output, session) {
     )
   })
 
-  observeEvent(input$s_send_tx, send_genes(head(s_result()$df$gene, 200), "tx_genes", "transcriptomics"))
-  observeEvent(input$s_send_og, send_genes(head(s_result()$df$gene, 40), "og_genes", "phylo"))
-  observeEvent(input$s_send_go, send_genes(s_result()$df$gene, "go_genes", "go"))
+  observeEvent(input$s_send_tx, send_genes(head(s_ticked()$gene, 200), "tx_genes", "transcriptomics"))
+  observeEvent(input$s_send_og, send_genes(head(s_ticked()$gene, 40), "og_genes", "phylo"))
+  observeEvent(input$s_send_go, send_genes(s_ticked()$gene, "go_genes", "go"))
 
   output$s_table <- renderReactable({
     df <- s_result()$df
@@ -1248,28 +1329,65 @@ server <- function(input, output, session) {
       length = df$length_aa,
       effector = ifelse(df$effector, '<span class="badge-effector">effector</span>', ""),
       process = ifelse(is.na(df$process), "", df$process),
+      additional = ifelse(is.na(df$additional_functions), "", df$additional_functions),
+      knockout = ifelse(is.na(df$knockout_reported), "", df$knockout_reported),
+      refs = vapply(seq_len(nrow(df)), function(i)
+        refs_html(df$reference[i], df$other_reference[i], df$knockout_phenotype[i],
+                  df$other_fungi_notes[i], df$evidence_quotes[i]), ""),
+      fungi = vapply(df$other_fungi_notes, expandable_html, "", noun = "note", split = " \\| |; ",
+                     USE.NAMES = FALSE),
+      quotes = vapply(df$evidence_quotes, expandable_html, "", noun = "quote", USE.NAMES = FALSE),
       module = ifelse(is.na(df$wgcna_module), "", df$wgcna_module),
       links = vapply(df$gene, xref_links_html, "", USE.NAMES = FALSE),
       stringsAsFactors = FALSE
     )
     rownames(tab) <- NULL
+    # Tick boxes select genes for downloads; clicking elsewhere on a row opens
+    # the gene profile (except in columns with links or expandable text)
     reactable(
       tab, searchable = TRUE, highlight = TRUE, compact = TRUE, striped = FALSE,
       defaultPageSize = 15, showPageSizeOptions = TRUE, pageSizeOptions = c(15, 30, 100),
-      selection = "single", onClick = "select",
+      selection = "multiple",
+      onClick = JS("function (rowInfo, column) {
+        if (['.selection', 'refs', 'fungi', 'quotes', 'links'].indexOf(column.id) >= 0) return;
+        if (window.Shiny) Shiny.setInputValue('s_row_open', rowInfo.index + 1, { priority: 'event' });
+      }"),
       columns = list(
+        .selection = colDef(width = 44, sticky = "left"),
         gene = colDef(name = "Gene", minWidth = 110,
                       cell = function(v) tags$span(class = "gene-id", v)),
         name = colDef(name = "Name", minWidth = 80),
         description = colDef(name = "Description", minWidth = 240),
         length = colDef(name = "Length (aa)", minWidth = 80, align = "right"),
         effector = colDef(name = "", html = TRUE, minWidth = 70, sortable = FALSE),
-        process = colDef(name = "Process affected", minWidth = 150),
+        process = colDef(name = "Curated process", minWidth = 150),
+        additional = colDef(name = "Additional functions", minWidth = 170),
+        knockout = colDef(name = "Knockout reported", minWidth = 90, align = "center"),
+        refs = colDef(name = "References", html = TRUE, minWidth = 170, sortable = FALSE),
+        fungi = colDef(name = "Other fungi", html = TRUE, minWidth = 260, sortable = FALSE),
+        quotes = colDef(name = "Evidence quotes", html = TRUE, minWidth = 320, sortable = FALSE),
         module = colDef(name = "WGCNA", minWidth = 80),
         links = colDef(name = "Databases", html = TRUE, minWidth = 230, sortable = FALSE)
       )
     )
   })
+
+  # Genes ticked in the results table (all results when none are ticked)
+  s_ticked <- reactive({
+    df <- s_result()$df
+    sel <- getReactableState("s_table", "selected")
+    sel <- sel[sel <= nrow(df)]
+    if (length(sel)) df[sort(sel), , drop = FALSE] else df
+  })
+  output$s_tick_note <- renderUI({
+    n <- length(getReactableState("s_table", "selected"))
+    div(class = "section-note mb-2",
+        if (n) tagList(tags$b(n), if (n == 1) "gene ticked:" else "genes ticked:",
+                       "downloads and Send to use only these. ",
+                       actionLink("s_clear_ticks", "Clear ticks"))
+        else "Tick rows to choose genes for downloads and Send to. Click a row to open its gene profile.")
+  })
+  observeEvent(input$s_clear_ticks, updateReactable("s_table", selected = NA))
 
   observe({
     df <- s_result()$df
@@ -1278,8 +1396,8 @@ server <- function(input, output, session) {
                          server = TRUE)
   })
 
-  observeEvent(getReactableState("s_table", "selected"), {
-    sel <- getReactableState("s_table", "selected")
+  observeEvent(input$s_row_open, {
+    sel <- input$s_row_open
     df <- s_result()$df
     if (length(sel) && sel <= nrow(df)) {
       g <- df$gene[sel]
@@ -1445,11 +1563,11 @@ server <- function(input, output, session) {
     protein_architecture_plot(g, width = session$clientData$output_s_profile_arch_width %||% 900, fs = fsz(-1))
   })
 
-  s_ids_for_download <- reactive(s_result()$df$gene)
+  s_ids_for_download <- reactive(s_ticked()$gene)
   output$s_dl_tsv <- downloadHandler(
     filename = function() paste0("MagnaGenes_search_", format(Sys.Date(), "%Y%m%d"), ".tsv"),
     content = function(file) {
-      df <- s_result()$df
+      df <- s_ticked()
       df$uniprot_url <- ifelse(is.na(df$uniprot_acc), NA, url_uniprot(df$uniprot_acc))
       df$alphafold_url <- ifelse(is.na(df$alphafold_acc), NA, url_alphafold(df$alphafold_acc))
       df$ensembl_url <- url_ensembl(df$gene)
