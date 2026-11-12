@@ -4,27 +4,27 @@
     "title": "Welcome and home page"
   },
   {
-    "time": 34.0,
+    "time": 34.1,
     "title": "Gene Search"
   },
   {
-    "time": 86.4,
+    "time": 113.0,
     "title": "Transcriptomics"
   },
   {
-    "time": 176.8,
+    "time": 203.3,
     "title": "Phosphoproteomics"
   },
   {
-    "time": 253.1,
+    "time": 279.5,
     "title": "Phylogenomics"
   },
   {
-    "time": 304.9,
+    "time": 331.4,
     "title": "GO Enrichment"
   },
   {
-    "time": 354.4,
+    "time": 381.1,
     "title": "Dark mode, Reset and About"
   }
 ]

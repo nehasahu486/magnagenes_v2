@@ -143,12 +143,39 @@ def main():
         click(app.locator("#s_go"), wait=3)
         caption("Results: annotation, phenotypes and links to UniProt, AlphaFold, Ensembl and InterPro", 4)
         scroll(400, 2)
+        # Curation columns from Magna-Mined, further right in the table
+        caption("Curated process, additional functions, knockouts and every cited PMID", 1)
+        frame.evaluate("document.querySelector('#s_table .rt-table').scrollTo({left: 520, behavior: 'smooth'})")
+        time.sleep(3)
+        caption("Notes from other fungi and evidence quotes from the papers", 1)
+        frame.evaluate("document.querySelector('#s_table .rt-table').scrollTo({left: 1100, behavior: 'smooth'})")
+        time.sleep(1.5)
+        # Open the evidence quotes of the first gene (done in the page: the cell sits in a
+        # horizontally scrolled table, where Playwright's own scroll-and-click times out)
+        quote_js = """(open) => {
+          const d = [...document.querySelectorAll('#s_table .rt-tbody .rt-tr')][0]
+                      .querySelectorAll('.cell-more');
+          const q = d[d.length - 1], s = q.querySelector('summary');
+          s.style.outline = open ? '3px solid #f5a623' : ''; s.style.outlineOffset = '3px';
+          if (open) q.scrollIntoView({block: 'nearest', inline: 'nearest'});
+          q.open = open;
+        }"""
+        frame.evaluate(quote_js, True)
+        time.sleep(4)
+        frame.evaluate(quote_js, False)
+        frame.evaluate("document.querySelector('#s_table .rt-table').scrollTo({left: 0, behavior: 'smooth'})")
+        time.sleep(1)
+        scroll(400, 1)
+        caption("Tick rows to download or send only those genes", 1)
+        boxes = app.locator("#s_table .rt-tbody input[type=checkbox]")
+        click(boxes.nth(0), wait=0.5)
+        click(boxes.nth(1), wait=1.5)
+        caption("Annotations, protein and CDS FASTA downloads in the sidebar now use the ticked genes", 3.5)
         scroll(0, 0.8)
         subtab("s_view", "profile", wait=3)
         caption("Gene profile: annotation, expression in every experiment and protein architecture", 3)
         scroll(700, 2.5)
         scroll(1300, 2.5)
-        caption("Protein and CDS FASTA downloads are in the sidebar", 2.5)
 
         # ---- Transcriptomics --------------------------------------------------
         tab("transcriptomics")

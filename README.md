@@ -34,6 +34,7 @@ site-assets/                loading-screen image, tutorial video and its chapter
 build_site.R                Shinylive export plus the loading screen
 tests/smoke_test.R          renders every output and download
 tools/record_tutorial.py    re-records the tutorial video (optional; needs Playwright)
+tools/take_screenshots.py   retakes the screenshots below (optional; needs Playwright)
 .github/workflows/          publishes the site to GitHub Pages on every push
 ```
 
@@ -57,6 +58,8 @@ The home page summarises the data in the database and links to each tool.
 ### Gene Search
 
 Search by MGG ID, gene name or keyword. Here `PMK1, MST12` and the keyword `melanin` return matching genes with their annotation, WGCNA module and links to UniProt, AlphaFold DB, Ensembl Fungi and InterPro. The "Send to" buttons pass the results to the other tabs. Keywords are matched as written, not as natural language, so single words such as `melanin` or `membrane` work best.
+
+Curation columns from Magna-Mined show the curated process, additional functions, whether a knockout has been reported, every cited PubMed ID, notes on the same gene in other fungi, and evidence quotes from the papers (with confidence tier, PMID and year). Tick rows to download, or send to another tab, only those genes; with no rows ticked, all results are used. The annotation TSV, protein FASTA and CDS FASTA each hold every selected gene in one file.
 
 ![Gene Search results](docs/screenshots/02_gene_search.png)
 
