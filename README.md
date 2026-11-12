@@ -130,6 +130,10 @@ If you use MagnaGenes v.2.0 in your research, please cite:
 
 Sahu N. (2026) MagnaGenes v.2.0: an integrated multi-omics explorer for the rice blast fungus *Magnaporthe oryzae*. <https://nehasahu486.github.io/magnagenes_v2/>
 
+## License
+
+MagnaGenes v2.0 is licensed under the [Creative Commons Attribution 4.0 International License (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/). You may share and adapt it for any purpose, provided you give appropriate credit. See [LICENSE](LICENSE) for the full text.
+
 ## Contact
 
 neha.sahu.tsl@gmail.com
